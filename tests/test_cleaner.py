@@ -1,4 +1,3 @@
-
 """Tests for JKLU Compass document cleaning."""
 
 import pytest
@@ -62,9 +61,7 @@ def test_cleaner_rejects_non_string_input() -> None:
 
 def test_cleaner_can_remove_all_blank_lines() -> None:
     """Configuration should allow all blank lines to be removed."""
-    cleaner = DocumentCleaner(
-        CleaningConfig(max_consecutive_blank_lines=0)
-    )
+    cleaner = DocumentCleaner(CleaningConfig(max_consecutive_blank_lines=0))
 
     result = cleaner.clean("First paragraph.\n\nSecond paragraph.")
 

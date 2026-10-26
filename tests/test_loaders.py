@@ -37,8 +37,7 @@ def test_load_jsonl_skips_malformed_json(tmp_path) -> None:
     """Malformed JSON lines should be reported without crashing the loader."""
     jsonl_path = tmp_path / "documents.jsonl"
     jsonl_path.write_text(
-        '{"content": "Valid record"}\n'
-        '{"content": invalid json}\n',
+        '{"content": "Valid record"}\n{"content": invalid json}\n',
         encoding="utf-8",
     )
 

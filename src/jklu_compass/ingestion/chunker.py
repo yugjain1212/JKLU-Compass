@@ -21,17 +21,17 @@ class ChunkingConfig:
         if self.chunk_size <= 0:
             raise ValueError("chunk_size must be greater than zero.")
 
-        if self.chunk_overlap < 0:
-            raise ValueError("chunk_overlap cannot be negative.")
-
-        if self.chunk_overlap >= self.chunk_size:
-            raise ValueError("chunk_overlap must be smaller than chunk_size.")
-
         if self.min_chunk_size < 1:
             raise ValueError("min_chunk_size must be at least 1.")
 
         if self.min_chunk_size > self.chunk_size:
             raise ValueError("min_chunk_size cannot exceed chunk_size.")
+
+        if self.chunk_overlap < 0:
+            raise ValueError("chunk_overlap cannot be negative.")
+
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +83,7 @@ class DocumentChunker:
 
             content = text[start:end].strip()
 
-            if content and (
-                len(content) >= self.config.min_chunk_size or not chunks
-            ):
+            if content and (len(content) >= self.config.min_chunk_size or not chunks):
                 chunk_id = self._make_chunk_id(
                     source=document.source,
                     chunk_index=chunk_index,
@@ -136,8 +134,8 @@ class DocumentChunker:
         content: str,
     ) -> str:
         """Generate a deterministic ID for a chunk."""
-        fingerprint = hashlib.sha256(
-            f"{source}\0{chunk_index}\0{content}".encode()
-        ).hexdigest()[:16]
+        fingerprint = hashlib.sha256(f"{source}\0{chunk_index}\0{content}".encode()).hexdigest()[
+            :16
+        ]
 
         return f"chunk_{fingerprint}"
