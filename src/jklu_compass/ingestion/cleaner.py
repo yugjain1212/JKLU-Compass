@@ -31,7 +31,7 @@ class DocumentCleaner:
     """Normalize scraped text and remove identifiable JKLU boilerplate."""
 
     def __init__(self, config: CleaningConfig | None = None) -> None:
-        """Initialize the cleaner with optional configuration."""
+        """Initialize the cleaner with an optional configuration."""
         self.config = config or CleaningConfig()
 
     def clean(self, text: str) -> str:
@@ -49,21 +49,27 @@ class DocumentCleaner:
         if not isinstance(text, str):
             raise TypeError("Document text must be a string.")
 
+        # Normalize Unicode characters.
         if self.config.normalize_unicode:
             text = unicodedata.normalize("NFC", text)
 
+        # Remove null bytes.
         if self.config.remove_null_bytes:
             text = text.replace("\x00", "")
 
+        # Normalize Windows and legacy Mac line endings.
         if self.config.normalize_line_endings:
             text = text.replace("\r\n", "\n").replace("\r", "\n")
 
+        # Remove recognizable JKLU navigation and shared boilerplate.
         if self.config.remove_jklu_navigation:
             text = self._remove_jklu_navigation(text)
 
+        # Collapse horizontal whitespace without merging separate lines.
         if self.config.collapse_horizontal_whitespace:
             text = re.sub(r"[^\S\n]+", " ", text)
 
+        # Normalize individual lines and control consecutive blank lines.
         lines = [line.strip(" \t") for line in text.split("\n")]
 
         cleaned_lines: list[str] = []
@@ -76,11 +82,13 @@ class DocumentCleaner:
                 continue
 
             blank_lines += 1
+
             if blank_lines <= self.config.max_consecutive_blank_lines:
                 cleaned_lines.append("")
 
         text = "\n".join(cleaned_lines)
 
+        # Remove whitespace from the beginning and end of the document.
         if self.config.strip_outer_whitespace:
             text = text.strip()
 
@@ -88,53 +96,76 @@ class DocumentCleaner:
 
     @staticmethod
     def _remove_jklu_navigation(text: str) -> str:
-        """Remove a recognizable repeated JKLU navigation/footer section.
+        """Remove recognizable JKLU navigation and shared page-template content.
 
-        A footer marker is required before truncation. This avoids cutting
-        documents merely because their main content contains navigation-like
-        links or headings.
+        The shared admissions block is removed only when the document also
+        contains the recognizable repeated JKLU navigation/footer structure.
+        Page-specific content before the shared block is preserved.
         """
         lines = text.split("\n")
 
-        navigation_markers = (
-            re.compile(
-                r"^\s*-\s+###\s+\[(?:About Us|ACADEMICS|Quick Links)\]\(",
-                re.IGNORECASE,
-            ),
+        # Recognizable repeated navigation headings.
+        navigation_pattern = re.compile(
+            r"^\s*-\s+###\s+\[(?:About Us|ACADEMICS|Quick Links)\]\(",
+            re.IGNORECASE,
         )
 
-        footer_markers = (
-            re.compile(r"^\s*####\s+Other Links\s*$", re.IGNORECASE),
-            re.compile(
-                r"^\s*-\s+###\s+\[Other Links\]\(",
-                re.IGNORECASE,
-            ),
+        # Marker near the end of the repeated navigation section.
+        footer_pattern = re.compile(
+            r"^\s*####\s+Other Links\s*$",
+            re.IGNORECASE,
         )
 
-        footer_positions = [
-            i
-            for i, line in enumerate(lines)
-            if any(marker.search(line) for marker in footer_markers)
+        # Beginning of the shared admissions navigation block observed
+        # in the inspected JKLU scraped documents.
+        admissions_pattern = re.compile(
+            r"^\s*-\s+###\s+Doctor of Philosophy\s+_PhD_\s*$",
+            re.IGNORECASE,
+        )
+
+        navigation_positions = [
+            index
+            for index, line in enumerate(lines)
+            if navigation_pattern.search(line)
         ]
 
-        if not footer_positions:
+        footer_positions = [
+            index
+            for index, line in enumerate(lines)
+            if footer_pattern.search(line)
+        ]
+
+        # Confirm that the recognizable navigation marker is followed
+        # by the expected footer marker.
+        has_template_navigation = (
+            bool(navigation_positions)
+            and any(
+                footer_position > navigation_positions[0]
+                for footer_position in footer_positions
+            )
+        )
+
+        if not has_template_navigation:
             return text
 
-        for footer_position in footer_positions:
-            navigation_positions = [
-                i
-                for i, line in enumerate(lines[:footer_position])
-                if any(marker.search(line) for marker in navigation_markers)
-            ]
+        navigation_start = navigation_positions[0]
 
-            if not navigation_positions:
-                continue
+        admissions_positions = [
+            index
+            for index, line in enumerate(lines)
+            if admissions_pattern.search(line)
+        ]
 
-            navigation_start = navigation_positions[0]
+        # Prefer the start of the shared admissions block because it
+        # preserves page-specific content, including genuine contact details.
+        if (
+            admissions_positions
+            and admissions_positions[0] < navigation_start
+        ):
+            cutoff = admissions_positions[0]
+        else:
+            # If the admissions marker is absent, remove the repeated
+            # navigation and everything after it.
+            cutoff = navigation_start
 
-            # Only truncate when the expected footer follows the navigation.
-            # This removes the entire repeated template block, including
-            # shared contact details, social links, and application links.
-            return "\n".join(lines[:navigation_start]).rstrip()
-
-        return text
+        return "\n".join(lines[:cutoff]).rstrip()

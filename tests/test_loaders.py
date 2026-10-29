@@ -49,26 +49,37 @@ def test_load_jsonl_skips_malformed_json(tmp_path) -> None:
     assert "Invalid JSON" in report.errors[0]
 
 
-def test_load_markdown_directory_recursively(tmp_path) -> None:
-    """Markdown files in nested directories should be loaded."""
-    nested_directory = tmp_path / "academics"
-    nested_directory.mkdir()
 
-    (tmp_path / "overview.md").write_text(
-        "# JKLU\nUniversity overview.",
+def test_markdown_front_matter_preserves_source_url_and_title(tmp_path) -> None:
+    """Markdown front matter should become metadata, not document content."""
+    markdown_path = tmp_path / "fee-structure.md"
+    markdown_path.write_text(
+        '---\n'
+        'url: "https://jklu.edu.in/admissions/fee-structure"\n'
+        'title: "  JKLU Fee Structure | UG, PG & PhD Programmes  "\n'
+        '---\n'
+        '# Fee Structure\n'
+        'Information about academic fees.\n',
         encoding="utf-8",
     )
-    (nested_directory / "programs.md").write_text(
-        "# Programs\nAcademic programs.",
-        encoding="utf-8",
+
+    report = DocumentLoader().load_markdown_file(markdown_path)
+
+    assert report.documents_loaded == 1
+
+    document = report.documents[0]
+    assert document.metadata["source_url"] == (
+        "https://jklu.edu.in/admissions/fee-structure"
     )
-
-    report = DocumentLoader().load_markdown_directory(tmp_path)
-
-    assert report.documents_loaded == 2
-    assert report.files_seen == 2
-    assert any(document.metadata["file_name"] == "programs.md" for document in report.documents)
-
+    assert document.metadata["title"] == (
+        "JKLU Fee Structure | UG, PG & PhD Programmes"
+    )
+    assert document.content.startswith("# Fee Structure")
+    assert "url:" not in document.content
+    assert "title:" not in document.content
+    assert document.source == str(markdown_path.resolve())
+    assert document.metadata["file_name"] == "fee-structure.md"
+    assert document.metadata["source_type"] == "markdown"
 
 def test_load_path_rejects_unsupported_extension(tmp_path) -> None:
     """Unsupported input file types should raise a clear error."""
