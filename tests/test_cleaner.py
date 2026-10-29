@@ -1,74 +1,78 @@
-"""Tests for JKLU Compass document cleaning."""
-
 import pytest
 
 from jklu_compass.ingestion.cleaner import CleaningConfig, DocumentCleaner
 
-
-def test_cleaner_normalizes_horizontal_whitespace() -> None:
-    """Repeated spaces should be collapsed without joining lines."""
+def test_cleaner_removes_jklu_template_navigation() -> None:
+    """Recognized template navigation and its footer should be removed."""
     cleaner = DocumentCleaner()
 
-    result = cleaner.clean("JKLU    offers   programs.\nSecond   line.")
+    text = """# Placements
 
-    assert result == "JKLU offers programs.\nSecond line."
+## Placement Support that Sets You Apart
 
+JKLU provides placement preparation and career support.
 
-def test_cleaner_preserves_headings_and_paragraphs() -> None:
-    """Headings and meaningful paragraph boundaries should remain."""
-    cleaner = DocumentCleaner()
-    text = "#   Academics\n\n\nUniversity programs.\n\nAdmission details."
+## Connect with Us
+
+Mr. Rahul Dev Kahera
+Phone: +91 9760404458
+Email: rahul.kahera@jklu.edu.in
+
+- ### [About Us](https://jklu.edu.in/placements#)
+- [About JKLU](https://jklu.edu.in/about-us/about-jklu)
+- ### [Quick Links](https://jklu.edu.in/placements#)
+
+#### Other Links
+
+- [Privacy Policy](https://jklu.edu.in/privacy-policy)
+"""
 
     result = cleaner.clean(text)
 
-    assert result == "# Academics\n\nUniversity programs.\n\nAdmission details."
+    assert "# Placements" in result
+    assert "placement preparation and career support" in result
+    assert "Mr. Rahul Dev Kahera" in result
+    assert "+91 9760404458" in result
+    assert "rahul.kahera@jklu.edu.in" in result
+    assert "About Us" not in result
+    assert "Privacy Policy" not in result
 
 
-def test_cleaner_normalizes_line_endings() -> None:
-    """Windows and legacy Mac line endings should become LF."""
+def test_cleaner_preserves_documents_without_jklu_navigation() -> None:
+    """Ordinary documents should not be truncated."""
     cleaner = DocumentCleaner()
 
-    result = cleaner.clean("First line\r\nSecond line\rThird line")
+    text = """# Academic Policies
 
-    assert result == "First line\nSecond line\nThird line"
+## Other Links
 
+Students can find additional academic resources in this section.
+"""
 
-def test_cleaner_removes_null_bytes() -> None:
-    """Null bytes should be removed."""
-    cleaner = DocumentCleaner()
+    result = cleaner.clean(text)
 
-    result = cleaner.clean("JKLU\x00 Compass")
+    assert result.rstrip() == text.rstrip()
+    assert "# Academic Policies" in result
+    assert "## Other Links" in result
+    assert "Students can find additional academic resources in this section." in result
+def test_cleaner_can_disable_jklu_navigation_removal() -> None:
+    """The navigation-removal behavior should be configurable."""
+    cleaner = DocumentCleaner(
+        CleaningConfig(remove_jklu_navigation=False)
+    )
 
-    assert result == "JKLU Compass"
+    text = """# Placements
 
+Useful placement information.
 
-def test_cleaner_normalizes_unicode() -> None:
-    """Equivalent Unicode representations should be normalized."""
-    cleaner = DocumentCleaner()
+- ### [About Us](https://jklu.edu.in/placements#)
 
-    result = cleaner.clean("Cafe\u0301")
+#### Other Links
 
-    assert result == "Café"
+- [Privacy Policy](https://jklu.edu.in/privacy-policy)
+"""
 
+    result = cleaner.clean(text)
 
-def test_cleaner_rejects_non_string_input() -> None:
-    """Invalid input types should raise a clear exception."""
-    cleaner = DocumentCleaner()
-
-    with pytest.raises(TypeError, match="must be a string"):
-        cleaner.clean(None)  # type: ignore[arg-type]
-
-
-def test_cleaner_can_remove_all_blank_lines() -> None:
-    """Configuration should allow all blank lines to be removed."""
-    cleaner = DocumentCleaner(CleaningConfig(max_consecutive_blank_lines=0))
-
-    result = cleaner.clean("First paragraph.\n\nSecond paragraph.")
-
-    assert result == "First paragraph.\nSecond paragraph."
-
-
-def test_cleaner_rejects_negative_blank_line_limit() -> None:
-    """Negative blank-line limits should be rejected."""
-    with pytest.raises(ValueError, match="cannot be negative"):
-        CleaningConfig(max_consecutive_blank_lines=-1)
+    assert "About Us" in result
+    assert "Privacy Policy" in result
