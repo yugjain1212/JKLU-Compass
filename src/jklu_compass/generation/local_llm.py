@@ -81,4 +81,4 @@ class LocalLLM:
                 "Ollama returned an empty response."
             )
 
-        return generated_text.strip()
+        return generated_text.strip() 

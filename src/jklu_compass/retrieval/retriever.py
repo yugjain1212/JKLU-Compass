@@ -66,9 +66,19 @@ class DocumentRetriever:
 
             source_url = self._valid_http_url(candidate_url)
 
-            title = str(
-                metadata.get("title") or metadata.get("file_name") or source or "Unknown source"
-            )
+            raw_title = metadata.get("title")
+            raw_file_name = metadata.get("file_name")
+
+            invalid_values = {"", "undefined", "none", "null"}
+
+            if raw_title and str(raw_title).strip().lower() not in invalid_values:
+                title = str(raw_title).strip()
+            elif raw_file_name and str(raw_file_name).strip().lower() not in invalid_values:
+                title = str(raw_file_name).strip()
+            elif source:
+                title = source
+            else:
+                title = "Unknown source"
 
             results.append(
                 RetrievalResult(

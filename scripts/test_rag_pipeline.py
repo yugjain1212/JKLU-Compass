@@ -8,6 +8,10 @@ def main() -> None:
 
     questions = [
         "What academic programs does JKLU offer?",
+        "What is the official website of JKLU?",
+        "What does JKLU's M.Des program focus on?",
+        "What programs are available in engineering?",
+        "What is the exact attendance requirement at JKLU?",
     ]
 
     for question in questions:
