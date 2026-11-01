@@ -1,11 +1,19 @@
-"""Split source documents into overlapping chunks for retrieval."""
+
+"""Split source documents into Markdown-aware overlapping chunks."""
 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 
 from jklu_compass.ingestion.loaders import SourceDocument
+
+
+_HEADING_PATTERN = re.compile(
+    r"^\s{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$"
+)
+_FENCE_PATTERN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,44 +54,30 @@ class DocumentChunk:
 
 
 class DocumentChunker:
-    """Split documents into overlapping, metadata-preserving chunks."""
+    """Split documents while preserving Markdown section context."""
 
     def __init__(self, config: ChunkingConfig | None = None) -> None:
         """Initialize the chunker."""
         self.config = config or ChunkingConfig()
 
     def chunk_document(self, document: SourceDocument) -> list[DocumentChunk]:
-        """Split one document into chunks.
-
-        Args:
-            document: Normalized source document.
-
-        Returns:
-            Ordered chunks containing the source text and metadata.
-        """
+        """Split one document into ordered, metadata-preserving chunks."""
         text = document.content.strip()
 
         if not text:
             return []
 
+        sections = self._split_markdown_sections(text)
         chunks: list[DocumentChunk] = []
-        start = 0
-        chunk_index = 0
-        text_length = len(text)
 
-        while start < text_length:
-            end = min(start + self.config.chunk_size, text_length)
+        for heading_path, body in sections:
+            section_chunks = self._chunk_section(heading_path, body)
 
-            # Prefer a nearby word boundary instead of cutting a word in half.
-            if end < text_length:
-                boundary = text.rfind(" ", start, end)
+            for content in section_chunks:
+                if not content:
+                    continue
 
-                if boundary > start:
-                    end = boundary
-
-            content = text[start:end].strip()
-
-            if content and (len(content) >= self.config.min_chunk_size or not chunks):
+                chunk_index = len(chunks)
                 chunk_id = self._make_chunk_id(
                     source=document.source,
                     chunk_index=chunk_index,
@@ -99,19 +93,6 @@ class DocumentChunker:
                         metadata=dict(document.metadata),
                     )
                 )
-                chunk_index += 1
-
-            if end >= text_length:
-                break
-
-            # Move forward while retaining the configured overlap.
-            next_start = end - self.config.chunk_overlap
-
-            # Ensure progress even if unusual whitespace or boundaries occur.
-            if next_start <= start:
-                next_start = start + self.config.chunk_size
-
-            start = next_start
 
         return chunks
 
@@ -119,11 +100,166 @@ class DocumentChunker:
         self,
         documents: list[SourceDocument],
     ) -> list[DocumentChunk]:
-        """Split multiple documents into a single ordered chunk list."""
+        """Split multiple documents into one ordered chunk list."""
         chunks: list[DocumentChunk] = []
 
         for document in documents:
             chunks.extend(self.chunk_document(document))
+
+        return chunks
+
+    @staticmethod
+    def _split_markdown_sections(
+        text: str,
+    ) -> list[tuple[tuple[str, ...], str]]:
+        """Split text at Markdown headings while retaining parent headings."""
+        sections: list[tuple[tuple[str, ...], str]] = []
+        heading_stack: list[str] = []
+        current_heading_path: tuple[str, ...] = ()
+        current_lines: list[str] = []
+
+        fence_marker: str | None = None
+
+        for line in text.splitlines():
+            fence_match = _FENCE_PATTERN.match(line)
+
+            if fence_match:
+                marker = fence_match.group(1)
+
+                if fence_marker is None:
+                    fence_marker = marker
+                elif (
+                    marker[0] == fence_marker[0]
+                    and len(marker) >= len(fence_marker)
+                ):
+                    fence_marker = None
+
+                current_lines.append(line)
+                continue
+
+            if fence_marker is not None:
+                current_lines.append(line)
+                continue
+
+            heading_match = _HEADING_PATTERN.match(line)
+
+            if not heading_match:
+                current_lines.append(line)
+                continue
+
+            body = "\n".join(current_lines).strip()
+
+            if body:
+                sections.append((current_heading_path, body))
+
+            level = len(heading_match.group(1))
+            heading_title = heading_match.group(2).strip().rstrip("#").strip()
+
+            heading_stack = heading_stack[: level - 1]
+            heading_stack.append(f"{'#' * level} {heading_title}")
+
+            current_heading_path = tuple(heading_stack)
+            current_lines = []
+
+        final_body = "\n".join(current_lines).strip()
+
+        if final_body or current_heading_path:
+            sections.append((current_heading_path, final_body))
+
+        if not sections:
+            sections.append(((), text))
+
+        return sections
+
+    def _chunk_section(
+        self,
+        heading_path: tuple[str, ...],
+        body: str,
+    ) -> list[str]:
+        """Chunk one section and repeat its heading context where possible."""
+        context = "\n".join(heading_path)
+
+        if context and len(context) > self.config.chunk_size // 2:
+            # Keep the closest heading when the full hierarchy is too long.
+            context = heading_path[-1][
+                : self.config.chunk_size // 2
+            ]
+
+        if not body.strip():
+            return [context[: self.config.chunk_size]] if context else []
+
+        prefix = f"{context}\n\n" if context else ""
+        body_budget = self.config.chunk_size - len(prefix)
+
+        if body_budget < 1:
+            prefix = ""
+            body_budget = self.config.chunk_size
+
+        body_parts = self._split_text(body.strip(), body_budget)
+
+        return [
+            f"{prefix}{part}".strip() if prefix else part.strip()
+            for part in body_parts
+            if part.strip()
+        ]
+
+    def _split_text(self, text: str, max_chars: int) -> list[str]:
+        """Split text near natural boundaries without excessive overlap."""
+        text = text.strip()
+
+        if not text:
+            return []
+
+        if len(text) <= max_chars:
+            return [text]
+
+        chunks: list[str] = []
+        start = 0
+        text_length = len(text)
+
+        effective_overlap = min(
+            self.config.chunk_overlap,
+            max_chars - 1,
+        )
+
+        while start < text_length:
+            hard_end = min(start + max_chars, text_length)
+            end = hard_end
+
+            if hard_end < text_length:
+                minimum_boundary = start + max(
+                    effective_overlap + 1,
+                    min(self.config.min_chunk_size, max_chars),
+                )
+
+                for separator in ("\n\n", "\n", " "):
+                    boundary = text.rfind(
+                        separator,
+                        minimum_boundary,
+                        hard_end,
+                    )
+
+                    if boundary > start:
+                        end = boundary
+                        break
+
+            if end <= start:
+                end = hard_end
+
+            piece = text[start:end].strip()
+
+            if piece:
+                chunks.append(piece)
+
+            if end >= text_length:
+                break
+
+            next_start = end - effective_overlap
+
+            if next_start <= start:
+                next_start = end
+
+            start = next_start
 
         return chunks
 
@@ -134,8 +270,8 @@ class DocumentChunker:
         content: str,
     ) -> str:
         """Generate a deterministic ID for a chunk."""
-        fingerprint = hashlib.sha256(f"{source}\0{chunk_index}\0{content}".encode()).hexdigest()[
-            :16
-        ]
+        fingerprint = hashlib.sha256(
+            f"{source}\0{chunk_index}\0{content}".encode()
+        ).hexdigest()[:16]
 
         return f"chunk_{fingerprint}"

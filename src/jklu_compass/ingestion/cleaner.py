@@ -10,7 +10,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class CleaningConfig:
     """Configuration for document cleaning."""
-
+    remove_jklu_admissions_banner: bool = True
     normalize_unicode: bool = True
     normalize_line_endings: bool = True
     remove_null_bytes: bool = True

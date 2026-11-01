@@ -153,3 +153,44 @@ def test_chunking_rejects_invalid_configuration(
     """Invalid chunking configurations should raise clear errors."""
     with pytest.raises(ValueError, match=message):
         ChunkingConfig(**config)
+
+def test_chunker_preserves_markdown_heading_context() -> None:
+    """Chunks should retain their section and parent headings."""
+    document = make_document(
+        "# Academics\n\n"
+        "## Engineering\n\n"
+        "JKLU offers undergraduate engineering programmes."
+    )
+
+    chunks = DocumentChunker().chunk_document(document)
+
+    assert len(chunks) == 1
+    assert "# Academics" in chunks[0].content
+    assert "## Engineering" in chunks[0].content
+    assert "undergraduate engineering programmes" in chunks[0].content
+
+
+def test_chunker_repeats_heading_for_long_sections() -> None:
+    """Every chunk from a long section should retain heading context."""
+    config = ChunkingConfig(
+        chunk_size=120,
+        chunk_overlap=20,
+        min_chunk_size=10,
+    )
+
+    document = make_document(
+        "# Academic Programmes\n\n"
+        + ("JKLU offers undergraduate engineering programmes. " * 15)
+    )
+
+    chunks = DocumentChunker(config).chunk_document(document)
+
+    assert len(chunks) > 1
+    assert all(
+        "# Academic Programmes" in chunk.content
+        for chunk in chunks
+    )
+    assert all(
+        len(chunk.content) <= config.chunk_size
+        for chunk in chunks
+    )
