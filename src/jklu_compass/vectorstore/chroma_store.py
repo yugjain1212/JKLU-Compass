@@ -128,6 +128,52 @@ class ChromaVectorStore:
             )
         ]
 
+    def get_all_records(
+        self,
+        batch_size: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Read all stored documents and metadata in paginated batches."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1.")
+
+        records: list[dict[str, Any]] = []
+        offset = 0
+
+        while True:
+            batch = self.collection.get(
+                limit=batch_size,
+                offset=offset,
+                include=["documents", "metadatas"],
+            )
+
+            ids = batch.get("ids", [])
+            documents = batch.get("documents") or []
+            metadatas = batch.get("metadatas") or []
+
+            if not ids:
+                break
+
+            records.extend(
+                {
+                    "id": record_id,
+                    "document": document or "",
+                    "metadata": metadata or {},
+                }
+                for record_id, document, metadata in zip(
+                    ids,
+                    documents,
+                    metadatas,
+                    strict=True,
+                )
+            )
+
+            offset += len(ids)
+
+            if len(ids) < batch_size:
+                break
+
+        return records
+
     def count(self) -> int:
         """Return the number of stored records."""
         return self.collection.count()

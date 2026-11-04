@@ -202,3 +202,164 @@ def test_http_source_is_used_when_source_url_is_missing(
     results = retriever.retrieve("JKLU academics")
 
     assert results[0].source_url == "https://jklu.edu.in/academics"
+
+
+def test_retrieve_prioritizes_matching_section_heading(
+    retriever: DocumentRetriever,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": "generic-1",
+            "document": "JKLU offers several academic opportunities.",
+            "metadata": {
+                "source": "/data/about.md",
+                "title": "About JKLU",
+                "section_title": "About the University",
+                "heading_path": "About JKLU > Overview",
+            },
+            "distance": 0.10,
+        },
+        {
+            "id": "programme-1",
+            "document": "JKLU offers B.Tech, B.Des and BBA programmes.",
+            "metadata": {
+                "source": "/data/programmes.md",
+                "title": "Academic Programmes",
+                "section_title": "Academic Programmes",
+                "heading_path": "Academics > Academic Programmes",
+            },
+            "distance": 0.20,
+        },
+    ]
+
+    results = retriever.retrieve(
+        "What undergraduate programmes does JKLU offer?",
+        top_k=1,
+    )
+
+    assert results[0].id == "programme-1"
+
+
+def test_retrieve_applies_source_diversity_after_ranking(
+    retriever: DocumentRetriever,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": "programme-1",
+            "document": "JKLU offers undergraduate programmes.",
+            "metadata": {
+                "source": "/data/programmes.md",
+                "section_title": "Academic Programmes",
+            },
+            "distance": 0.10,
+        },
+        {
+            "id": "programme-2",
+            "document": "JKLU offers B.Tech and B.Des programmes.",
+            "metadata": {
+                "source": "/data/programmes.md",
+                "section_title": "Academic Programmes",
+            },
+            "distance": 0.12,
+        },
+        {
+            "id": "mobility-1",
+            "document": "JKLU offers student mobility opportunities.",
+            "metadata": {
+                "source": "/data/mobility.md",
+                "section_title": "Student Mobility",
+            },
+            "distance": 0.15,
+        },
+    ]
+
+    results = retriever.retrieve(
+        "What undergraduate programmes does JKLU offer?",
+        top_k=2,
+    )
+
+    assert len(results) == 2
+    assert results[0].id == "programme-1"
+    assert results[1].id == "mobility-1"
+
+
+def test_retrieve_allows_multiple_chunks_from_pdf(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": f"pdf-chunk-{index}",
+            "document": f"B.Tech programme information {index}.",
+            "metadata": {
+                "title": "Engineering Brochure",
+                "source_url": "https://jklu.edu.in/uploads/engineering-brochure.pdf",
+                "section_title": f"B.Tech Programme {index}",
+            },
+            "distance": 0.10 + index * 0.01,
+        }
+        for index in range(1, 7)
+    ]
+
+    retriever = DocumentRetriever(
+        encoder=encoder,
+        vector_store=vector_store,
+        max_chunks_per_pdf=6,
+    )
+
+    results = retriever.retrieve("B.Tech programmes", top_k=6)
+
+    assert len(results) == 6
+    assert {result.id for result in results} == {f"pdf-chunk-{index}" for index in range(1, 7)}
+
+
+def test_retrieve_keeps_html_source_limit_of_one(
+    retriever: DocumentRetriever,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": f"html-chunk-{index}",
+            "document": f"JKLU academic information {index}.",
+            "metadata": {
+                "title": "Academic Programmes",
+                "source_url": "https://jklu.edu.in/academics",
+            },
+            "distance": 0.10 + index * 0.01,
+        }
+        for index in range(1, 4)
+    ]
+
+    results = retriever.retrieve("JKLU academic information", top_k=3)
+
+    assert len(results) == 1
+    assert results[0].id == "html-chunk-1"
+
+
+def test_retrieve_respects_configured_pdf_chunk_limit(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": f"pdf-chunk-{index}",
+            "document": f"Engineering programme information {index}.",
+            "metadata": {
+                "source_url": "https://jklu.edu.in/engineering-brochure.pdf?download=1",
+            },
+            "distance": 0.10 + index * 0.01,
+        }
+        for index in range(1, 5)
+    ]
+
+    retriever = DocumentRetriever(
+        encoder=encoder,
+        vector_store=vector_store,
+        max_chunks_per_pdf=3,
+    )
+
+    results = retriever.retrieve("Engineering programme information", top_k=4)
+
+    assert len(results) == 3

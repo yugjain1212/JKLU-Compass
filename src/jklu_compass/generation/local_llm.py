@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import requests
+import httpx
 
 
 class LocalLLMError(RuntimeError):
@@ -10,7 +10,7 @@ class LocalLLMError(RuntimeError):
 
 
 class LocalLLM:
-    """Generate grounded responses using a locally running Ollama model."""
+    """Generate responses using a locally running Ollama model."""
 
     def __init__(
         self,
@@ -18,6 +18,12 @@ class LocalLLM:
         base_url: str = "http://localhost:11434",
         timeout: int = 180,
     ) -> None:
+        if not model.strip():
+            raise ValueError("Model name cannot be empty.")
+
+        if timeout < 1:
+            raise ValueError("Timeout must be at least 1 second.")
+
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -28,10 +34,13 @@ class LocalLLM:
         *,
         temperature: float = 0.2,
     ) -> str:
-        """Generate a response from a prompt using the local Ollama API."""
+        """Generate a response using the Ollama generate API."""
 
-        if not prompt or not prompt.strip():
+        if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Prompt cannot be empty.")
+
+        if not 0.0 <= temperature <= 2.0:
+            raise ValueError("Temperature must be between 0 and 2.")
 
         endpoint = f"{self.base_url}/api/generate"
 
@@ -46,7 +55,7 @@ class LocalLLM:
         }
 
         try:
-            response = requests.post(
+            response = httpx.post(
                 endpoint,
                 json=payload,
                 timeout=self.timeout,
@@ -54,17 +63,20 @@ class LocalLLM:
             response.raise_for_status()
             data = response.json()
 
-        except requests.exceptions.ConnectionError as exc:
+        except httpx.ConnectError as exc:
             raise LocalLLMError("Cannot connect to Ollama. Make sure Ollama is running.") from exc
 
-        except requests.exceptions.Timeout as exc:
+        except httpx.TimeoutException as exc:
             raise LocalLLMError(f"Ollama timed out after {self.timeout} seconds.") from exc
 
-        except requests.exceptions.HTTPError as exc:
+        except httpx.HTTPStatusError as exc:
             raise LocalLLMError(f"Ollama returned an HTTP error: {exc}") from exc
 
-        except requests.exceptions.RequestException as exc:
+        except httpx.RequestError as exc:
             raise LocalLLMError(f"Request to Ollama failed: {exc}") from exc
+
+        except ValueError as exc:
+            raise LocalLLMError("Ollama returned an invalid JSON response.") from exc
 
         generated_text = data.get("response", "")
 

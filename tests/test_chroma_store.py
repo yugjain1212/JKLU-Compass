@@ -164,3 +164,46 @@ def test_reset_clears_records(store: ChromaVectorStore) -> None:
     store.reset()
 
     assert store.count() == 0
+
+
+def test_get_all_records_returns_documents_and_metadata(
+    store: ChromaVectorStore,
+) -> None:
+    store.add(
+        ids=["chunk-1", "chunk-2"],
+        documents=["JKLU admissions", "JKLU academics"],
+        embeddings=[[1.0, 0.0], [0.0, 1.0]],
+        metadatas=[
+            {"title": "Admissions", "section_title": "Eligibility"},
+            {"title": "Academics", "section_title": "Programmes"},
+        ],
+    )
+
+    records = store.get_all_records()
+
+    assert len(records) == 2
+    assert records[0]["id"] == "chunk-1"
+    assert records[0]["document"] == "JKLU admissions"
+    assert records[0]["metadata"]["section_title"] == "Eligibility"
+
+
+def test_get_all_records_supports_pagination(
+    store: ChromaVectorStore,
+) -> None:
+    store.add(
+        ids=[f"chunk-{i}" for i in range(5)],
+        documents=[f"Document {i}" for i in range(5)],
+        embeddings=[[float(i + 1), 1.0] for i in range(5)],
+    )
+
+    records = store.get_all_records(batch_size=2)
+
+    assert len(records) == 5
+    assert {record["id"] for record in records} == {f"chunk-{i}" for i in range(5)}
+
+
+def test_get_all_records_rejects_invalid_batch_size(
+    store: ChromaVectorStore,
+) -> None:
+    with pytest.raises(ValueError, match="batch_size"):
+        store.get_all_records(batch_size=0)
