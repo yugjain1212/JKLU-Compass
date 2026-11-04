@@ -68,8 +68,80 @@ def test_retrieve_encodes_query_and_searches(
     encoder.encode.assert_called_once_with("What are JKLU fees?")
     vector_store.search.assert_called_once_with(
         query_embedding=[0.1, 0.2, 0.3],
-        top_k=3,
+        top_k=9,
     )
+
+
+def test_retrieve_deduplicates_chunks_from_same_source(
+    retriever: DocumentRetriever,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": "page-a-1",
+            "document": "Best matching chunk from page A.",
+            "metadata": {
+                "title": "Page A",
+                "source_url": "https://jklu.edu.in/academics",
+            },
+            "distance": 0.10,
+        },
+        {
+            "id": "page-a-2",
+            "document": "Another chunk from page A.",
+            "metadata": {
+                "title": "Page A",
+                "source_url": "https://jklu.edu.in/academics/",
+            },
+            "distance": 0.12,
+        },
+        {
+            "id": "page-b-1",
+            "document": "Relevant chunk from page B.",
+            "metadata": {
+                "title": "Page B",
+                "source_url": "https://jklu.edu.in/admissions",
+            },
+            "distance": 0.15,
+        },
+    ]
+
+    results = retriever.retrieve("JKLU academics", top_k=2)
+
+    assert len(results) == 2
+    assert [result.id for result in results] == [
+        "page-a-1",
+        "page-b-1",
+    ]
+
+
+def test_retrieve_deduplicates_urls_with_tracking_parameters(
+    retriever: DocumentRetriever,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": "page-a-1",
+            "document": "Original result.",
+            "metadata": {
+                "source_url": "https://jklu.edu.in/academics?utm_source=test",
+            },
+            "distance": 0.10,
+        },
+        {
+            "id": "page-a-2",
+            "document": "Duplicate result.",
+            "metadata": {
+                "source_url": "https://jklu.edu.in/academics#programmes",
+            },
+            "distance": 0.12,
+        },
+    ]
+
+    results = retriever.retrieve("JKLU academics", top_k=2)
+
+    assert len(results) == 1
+    assert results[0].id == "page-a-1"
 
 
 def test_retrieve_rejects_empty_query(

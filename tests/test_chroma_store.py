@@ -110,6 +110,50 @@ def test_search_rejects_invalid_top_k(store: ChromaVectorStore) -> None:
         store.search([1.0, 0.0], top_k=0)
 
 
+def test_get_ids_by_source(store: ChromaVectorStore) -> None:
+    """Return only IDs belonging to the requested source."""
+    store.add(
+        ids=["chunk-1", "chunk-2", "chunk-3"],
+        documents=["First", "Second", "Third"],
+        embeddings=[
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.7, 0.7],
+        ],
+        metadatas=[
+            {"source": "source-a"},
+            {"source": "source-a"},
+            {"source": "source-b"},
+        ],
+    )
+
+    assert set(store.get_ids_by_source("source-a")) == {
+        "chunk-1",
+        "chunk-2",
+    }
+
+
+def test_delete_ids_preserves_other_records(
+    store: ChromaVectorStore,
+) -> None:
+    """Delete selected IDs without affecting unrelated records."""
+    store.add(
+        ids=["chunk-1", "chunk-2"],
+        documents=["First", "Second"],
+        embeddings=[[1.0, 0.0], [0.0, 1.0]],
+        metadatas=[
+            {"source": "source-a"},
+            {"source": "source-b"},
+        ],
+    )
+
+    deleted = store.delete_ids(["chunk-1"])
+
+    assert deleted == 1
+    assert store.count() == 1
+    assert store.get_ids_by_source("source-b") == ["chunk-2"]
+
+
 def test_reset_clears_records(store: ChromaVectorStore) -> None:
     store.add(
         ids=["chunk-1"],

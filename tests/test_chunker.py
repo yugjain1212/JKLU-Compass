@@ -154,12 +154,11 @@ def test_chunking_rejects_invalid_configuration(
     with pytest.raises(ValueError, match=message):
         ChunkingConfig(**config)
 
+
 def test_chunker_preserves_markdown_heading_context() -> None:
     """Chunks should retain their section and parent headings."""
     document = make_document(
-        "# Academics\n\n"
-        "## Engineering\n\n"
-        "JKLU offers undergraduate engineering programmes."
+        "# Academics\n\n## Engineering\n\nJKLU offers undergraduate engineering programmes."
     )
 
     chunks = DocumentChunker().chunk_document(document)
@@ -179,18 +178,65 @@ def test_chunker_repeats_heading_for_long_sections() -> None:
     )
 
     document = make_document(
-        "# Academic Programmes\n\n"
-        + ("JKLU offers undergraduate engineering programmes. " * 15)
+        "# Academic Programmes\n\n" + ("JKLU offers undergraduate engineering programmes. " * 15)
     )
 
     chunks = DocumentChunker(config).chunk_document(document)
 
     assert len(chunks) > 1
-    assert all(
-        "# Academic Programmes" in chunk.content
-        for chunk in chunks
+    assert all("# Academic Programmes" in chunk.content for chunk in chunks)
+    assert all(len(chunk.content) <= config.chunk_size for chunk in chunks)
+
+
+def test_chunker_adds_section_metadata() -> None:
+    """Chunks should expose their Markdown section metadata."""
+    document = make_document(
+        "# Academics\n\n## Engineering\n\nJKLU offers undergraduate engineering programmes."
     )
-    assert all(
-        len(chunk.content) <= config.chunk_size
-        for chunk in chunks
+
+    chunks = DocumentChunker().chunk_document(document)
+
+    assert len(chunks) == 1
+    assert chunks[0].metadata["section_title"] == "Engineering"
+    assert chunks[0].metadata["heading_level"] == 2
+    assert chunks[0].metadata["heading_path"] == [
+        "# Academics",
+        "## Engineering",
+    ]
+
+
+def test_chunker_updates_metadata_for_sibling_sections() -> None:
+    """Sibling sections should not inherit one another's headings."""
+    document = make_document(
+        "# Academics\n\n"
+        "## Engineering\n\n"
+        "Engineering programmes are available.\n\n"
+        "## Management\n\n"
+        "Management programmes are available."
     )
+
+    chunks = DocumentChunker().chunk_document(document)
+
+    assert len(chunks) == 2
+    assert chunks[0].metadata["section_title"] == "Engineering"
+    assert chunks[1].metadata["section_title"] == "Management"
+
+    assert chunks[0].metadata["heading_path"] == [
+        "# Academics",
+        "## Engineering",
+    ]
+    assert chunks[1].metadata["heading_path"] == [
+        "# Academics",
+        "## Management",
+    ]
+
+
+def test_chunker_preserves_document_metadata_with_section_metadata() -> None:
+    """Adding section metadata should not discard source metadata."""
+    document = make_document("# Academics\n\nJKLU offers academic programmes.")
+
+    chunks = DocumentChunker().chunk_document(document)
+
+    assert chunks[0].metadata["category"] == "academics"
+    assert chunks[0].metadata["source_type"] == "test"
+    assert chunks[0].metadata["section_title"] == "Academics"

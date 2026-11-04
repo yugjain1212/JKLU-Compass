@@ -10,6 +10,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class CleaningConfig:
     """Configuration for document cleaning."""
+
     remove_jklu_admissions_banner: bool = True
     normalize_unicode: bool = True
     normalize_line_endings: bool = True
@@ -22,9 +23,7 @@ class CleaningConfig:
     def __post_init__(self) -> None:
         """Validate cleaning configuration."""
         if self.max_consecutive_blank_lines < 0:
-            raise ValueError(
-                "max_consecutive_blank_lines cannot be negative."
-            )
+            raise ValueError("max_consecutive_blank_lines cannot be negative.")
 
 
 class DocumentCleaner:
@@ -60,6 +59,10 @@ class DocumentCleaner:
         # Normalize Windows and legacy Mac line endings.
         if self.config.normalize_line_endings:
             text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Remove the repeated admissions banner independently of navigation.
+        if self.config.remove_jklu_admissions_banner:
+            text = self._remove_jklu_admissions_banner(text)
 
         # Remove recognizable JKLU navigation and shared boilerplate.
         if self.config.remove_jklu_navigation:
@@ -124,25 +127,17 @@ class DocumentCleaner:
         )
 
         navigation_positions = [
-            index
-            for index, line in enumerate(lines)
-            if navigation_pattern.search(line)
+            index for index, line in enumerate(lines) if navigation_pattern.search(line)
         ]
 
         footer_positions = [
-            index
-            for index, line in enumerate(lines)
-            if footer_pattern.search(line)
+            index for index, line in enumerate(lines) if footer_pattern.search(line)
         ]
 
         # Confirm that the recognizable navigation marker is followed
         # by the expected footer marker.
-        has_template_navigation = (
-            bool(navigation_positions)
-            and any(
-                footer_position > navigation_positions[0]
-                for footer_position in footer_positions
-            )
+        has_template_navigation = bool(navigation_positions) and any(
+            footer_position > navigation_positions[0] for footer_position in footer_positions
         )
 
         if not has_template_navigation:
@@ -151,17 +146,12 @@ class DocumentCleaner:
         navigation_start = navigation_positions[0]
 
         admissions_positions = [
-            index
-            for index, line in enumerate(lines)
-            if admissions_pattern.search(line)
+            index for index, line in enumerate(lines) if admissions_pattern.search(line)
         ]
 
         # Prefer the start of the shared admissions block because it
         # preserves page-specific content, including genuine contact details.
-        if (
-            admissions_positions
-            and admissions_positions[0] < navigation_start
-        ):
+        if admissions_positions and admissions_positions[0] < navigation_start:
             cutoff = admissions_positions[0]
         else:
             # If the admissions marker is absent, remove the repeated
@@ -169,3 +159,44 @@ class DocumentCleaner:
             cutoff = navigation_start
 
         return "\n".join(lines[:cutoff]).rstrip()
+
+    @staticmethod
+    def _remove_jklu_admissions_banner(text: str) -> str:
+        """Remove the identifiable, repeated JKLU admissions banner.
+
+        Only removes a banner heading when immediately followed by its
+        recognizable Apply Now link. Other admissions-related content
+        is preserved.
+        """
+        lines = text.split("\n")
+        cleaned_lines: list[str] = []
+        index = 0
+
+        banner_pattern = re.compile(
+            r"^\s*Applications\s+open\s+for\s+all\s+UG\s*&\s*PG\s+"
+            r"Programme\s+2026\s*\\?\|\s*$",
+            re.IGNORECASE,
+        )
+
+        apply_link_pattern = re.compile(
+            r"^\s*\[Apply Now\]\("
+            r"https?://applications\.jklu\.edu\.in/"
+            r"\?utm_source=website&utm_medium=top_banner_Optin"
+            r"\)\s*$",
+            re.IGNORECASE,
+        )
+
+        while index < len(lines):
+            if (
+                banner_pattern.fullmatch(lines[index])
+                and index + 1 < len(lines)
+                and apply_link_pattern.fullmatch(lines[index + 1])
+            ):
+                # Skip only the recognized two-line banner.
+                index += 2
+                continue
+
+            cleaned_lines.append(lines[index])
+            index += 1
+
+        return "\n".join(cleaned_lines)

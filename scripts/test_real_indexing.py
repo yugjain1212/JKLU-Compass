@@ -10,23 +10,22 @@ from tempfile import TemporaryDirectory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
-
+# noqa: E402
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 # ---------------------------------------------------------
 # 2. Import project modules
 # ---------------------------------------------------------
-
-from jklu_compass.embeddings.encoder import EmbeddingEncoder
-from jklu_compass.ingestion.indexer import DocumentIndexer
-from jklu_compass.ingestion.pipeline import IngestionPipeline
-from jklu_compass.vectorstore.chroma_store import ChromaVectorStore
-
+from jklu_compass.embeddings.encoder import EmbeddingEncoder  # noqa: E402
+from jklu_compass.ingestion.indexer import DocumentIndexer  # noqa: E402
+from jklu_compass.ingestion.pipeline import IngestionPipeline  # noqa: E402
+from jklu_compass.vectorstore.chroma_store import ChromaVectorStore  # noqa: E402
 
 # ---------------------------------------------------------
 # 3. Main smoke-test function
 # ---------------------------------------------------------
+
 
 def main() -> None:
     """Test document ingestion, embedding, indexing, and retrieval."""
@@ -158,29 +157,21 @@ def main() -> None:
         # 3.8 Validate the smoke-test results
         # -------------------------------------------------
 
-        assert report.documents_loaded == 2, (
-            f"Expected 2 documents, got {report.documents_loaded}"
-        )
+        assert report.documents_loaded == 2, f"Expected 2 documents, got {report.documents_loaded}"
 
-        assert report.chunks_created > 0, (
-            "The ingestion pipeline did not create any chunks."
-        )
+        assert report.chunks_created > 0, "The ingestion pipeline did not create any chunks."
 
         assert report.chunks_indexed == report.chunks_created, (
-            f"Created {report.chunks_created} chunks but indexed "
-            f"{report.chunks_indexed}."
+            f"Created {report.chunks_created} chunks but indexed {report.chunks_indexed}."
         )
 
         assert store.count() == report.chunks_indexed, (
-            f"Expected {report.chunks_indexed} stored records, "
-            f"got {store.count()}."
+            f"Expected {report.chunks_indexed} stored records, got {store.count()}."
         )
 
         assert results, "Semantic retrieval returned no results."
 
-        assert len(results) <= 2, (
-            f"Expected at most 2 results, got {len(results)}."
-        )
+        assert len(results) <= 2, f"Expected at most 2 results, got {len(results)}."
 
         print("\n" + "=" * 60)
         print("SMOKE TEST PASSED")

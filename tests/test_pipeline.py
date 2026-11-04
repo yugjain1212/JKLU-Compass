@@ -9,19 +9,18 @@ from jklu_compass.ingestion.chunker import ChunkingConfig, DocumentChunker
 from jklu_compass.ingestion.pipeline import IngestionPipeline
 
 
-
 def test_pipeline_preserves_markdown_front_matter_metadata(
     tmp_path: Path,
 ) -> None:
     """Front-matter URL and title should survive ingestion and chunking."""
     markdown_path = tmp_path / "fee-structure.md"
     markdown_path.write_text(
-        '---\n'
+        "---\n"
         'url: "https://jklu.edu.in/admissions/fee-structure"\n'
         'title: "  JKLU Fee Structure  "\n'
-        '---\n'
-        '# Fee Structure\n\n'
-        'JKLU publishes fee information for its academic programmes.',
+        "---\n"
+        "# Fee Structure\n\n"
+        "JKLU publishes fee information for its academic programmes.",
         encoding="utf-8",
     )
 
@@ -31,15 +30,14 @@ def test_pipeline_preserves_markdown_front_matter_metadata(
 
     chunk = report.chunks[0]
 
-    assert chunk.metadata["source_url"] == (
-        "https://jklu.edu.in/admissions/fee-structure"
-    )
+    assert chunk.metadata["source_url"] == ("https://jklu.edu.in/admissions/fee-structure")
     assert chunk.metadata["title"] == "JKLU Fee Structure"
     assert chunk.metadata["source_type"] == "markdown"
     assert chunk.metadata["file_name"] == "fee-structure.md"
     assert "---" not in chunk.content
     assert "url:" not in chunk.content
     assert "title:" not in chunk.content
+
 
 def test_pipeline_processes_markdown_directory(tmp_path: Path) -> None:
     """The pipeline should load, clean, and chunk Markdown documents."""

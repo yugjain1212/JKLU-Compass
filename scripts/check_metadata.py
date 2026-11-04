@@ -28,10 +28,7 @@ def main() -> None:
 
         title_values[str(title)] += 1
 
-        if (
-            not title
-            or str(title).strip().lower() in {"undefined", "none", "null"}
-        ):
+        if not title or str(title).strip().lower() in {"undefined", "none", "null"}:
             bad_titles.append(
                 {
                     "title": title,

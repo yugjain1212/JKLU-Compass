@@ -40,8 +40,7 @@ def main() -> None:
         matched = [keyword for keyword in keywords if keyword in lowered]
 
         if len(matched) >= 2 or (
-            "academic programmes" in lowered
-            or "academic programs" in lowered
+            "academic programmes" in lowered or "academic programs" in lowered
         ):
             matches.append(
                 {

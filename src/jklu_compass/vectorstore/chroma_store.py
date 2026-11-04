@@ -132,6 +132,31 @@ class ChromaVectorStore:
         """Return the number of stored records."""
         return self.collection.count()
 
+    def get_ids_by_source(self, source: str) -> list[str]:
+        """Return all stored chunk IDs belonging to one source."""
+        if not source.strip():
+            raise ValueError("source must not be empty.")
+
+        records = self.collection.get(
+            where={"source": source},
+            include=[],
+        )
+
+        return records.get("ids", [])
+
+    def delete_ids(self, ids: Sequence[str]) -> int:
+        """Delete specific chunk IDs from the collection."""
+        if isinstance(ids, str):
+            raise TypeError("ids must be a sequence, not a string.")
+
+        unique_ids = list(dict.fromkeys(ids))
+
+        if not unique_ids:
+            return 0
+
+        self.collection.delete(ids=unique_ids)
+        return len(unique_ids)
+
     def reset(self) -> None:
         """Delete all records from the collection."""
         self.collection.delete(ids=self.collection.get()["ids"])

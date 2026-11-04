@@ -49,17 +49,16 @@ def test_load_jsonl_skips_malformed_json(tmp_path) -> None:
     assert "Invalid JSON" in report.errors[0]
 
 
-
 def test_markdown_front_matter_preserves_source_url_and_title(tmp_path) -> None:
     """Markdown front matter should become metadata, not document content."""
     markdown_path = tmp_path / "fee-structure.md"
     markdown_path.write_text(
-        '---\n'
+        "---\n"
         'url: "https://jklu.edu.in/admissions/fee-structure"\n'
         'title: "  JKLU Fee Structure | UG, PG & PhD Programmes  "\n'
-        '---\n'
-        '# Fee Structure\n'
-        'Information about academic fees.\n',
+        "---\n"
+        "# Fee Structure\n"
+        "Information about academic fees.\n",
         encoding="utf-8",
     )
 
@@ -68,18 +67,15 @@ def test_markdown_front_matter_preserves_source_url_and_title(tmp_path) -> None:
     assert report.documents_loaded == 1
 
     document = report.documents[0]
-    assert document.metadata["source_url"] == (
-        "https://jklu.edu.in/admissions/fee-structure"
-    )
-    assert document.metadata["title"] == (
-        "JKLU Fee Structure | UG, PG & PhD Programmes"
-    )
+    assert document.metadata["source_url"] == ("https://jklu.edu.in/admissions/fee-structure")
+    assert document.metadata["title"] == ("JKLU Fee Structure | UG, PG & PhD Programmes")
     assert document.content.startswith("# Fee Structure")
     assert "url:" not in document.content
     assert "title:" not in document.content
     assert document.source == str(markdown_path.resolve())
     assert document.metadata["file_name"] == "fee-structure.md"
     assert document.metadata["source_type"] == "markdown"
+
 
 def test_load_path_rejects_unsupported_extension(tmp_path) -> None:
     """Unsupported input file types should raise a clear error."""

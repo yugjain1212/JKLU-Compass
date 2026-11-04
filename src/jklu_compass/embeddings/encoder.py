@@ -37,7 +37,6 @@ class EmbeddingEncoder:
         self.normalize_embeddings = normalize_embeddings
         self._model = SentenceTransformer(model_name)
 
-
         self.embedding_dimension = self._model.get_sentence_embedding_dimension()
 
         if self.embedding_dimension is None:

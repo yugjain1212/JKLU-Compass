@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
-
 
 # ---------------------------------------------------------
 # 1. Configure project paths
@@ -35,10 +36,9 @@ if str(SRC_DIR) not in sys.path:
 
 
 # Import project components after configuring sys.path.
-from jklu_compass.embeddings.encoder import EmbeddingEncoder
-from jklu_compass.ingestion.indexer import DocumentIndexer
-from jklu_compass.vectorstore.chroma_store import ChromaVectorStore
-
+from jklu_compass.embeddings.encoder import EmbeddingEncoder  # noqa: E402
+from jklu_compass.ingestion.indexer import DocumentIndexer  # noqa: E402
+from jklu_compass.vectorstore.chroma_store import ChromaVectorStore  # noqa: E402
 
 # ---------------------------------------------------------
 # 2. Configure logging
@@ -57,12 +57,11 @@ logger = logging.getLogger(__name__)
 # 3. Parse command-line arguments
 # ---------------------------------------------------------
 
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
 
-    parser = argparse.ArgumentParser(
-        description="Index the JKLU website dataset into ChromaDB."
-    )
+    parser = argparse.ArgumentParser(description="Index the JKLU website dataset into ChromaDB.")
 
     parser.add_argument(
         "--batch-size",
@@ -71,10 +70,18 @@ def parse_arguments() -> argparse.Namespace:
         help="Number of chunks embedded per batch. Default: 32.",
     )
 
-    parser.add_argument(
+    operation_group = parser.add_mutually_exclusive_group()
+
+    operation_group.add_argument(
         "--reset",
         action="store_true",
-        help="Delete existing records in the target collection before indexing.",
+        help="Delete existing records before indexing.",
+    )
+
+    operation_group.add_argument(
+        "--sync",
+        action="store_true",
+        help="Remove obsolete chunks from successfully processed sources.",
     )
 
     return parser.parse_args()
@@ -84,37 +91,31 @@ def parse_arguments() -> argparse.Namespace:
 # 4. Validate the dataset
 # ---------------------------------------------------------
 
+
 def validate_dataset() -> list[Path]:
     """Check the source directory and return Markdown files."""
 
     if not SOURCE_DIR.exists():
-        raise FileNotFoundError(
-            f"Dataset directory does not exist: {SOURCE_DIR}"
-        )
+        raise FileNotFoundError(f"Dataset directory does not exist: {SOURCE_DIR}")
 
     if not SOURCE_DIR.is_dir():
-        raise NotADirectoryError(
-            f"Expected a directory, received: {SOURCE_DIR}"
-        )
+        raise NotADirectoryError(f"Expected a directory, received: {SOURCE_DIR}")
 
     markdown_files = sorted(
         path
         for path in SOURCE_DIR.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() in {".md", ".markdown"}
+        if path.is_file() and path.suffix.lower() in {".md", ".markdown"}
     )
 
     if not markdown_files:
-        raise RuntimeError(
-            f"No Markdown files found in {SOURCE_DIR}"
-        )
+        raise RuntimeError(f"No Markdown files found in {SOURCE_DIR}")
 
     logger.info("Project directory: %s", PROJECT_ROOT)
     logger.info("Dataset directory: %s", SOURCE_DIR)
     logger.info("Markdown files found: %d", len(markdown_files))
-    logger.info("Dataset size: %.2f MB", sum(
-        path.stat().st_size for path in markdown_files
-    ) / (1024 * 1024))
+    logger.info(
+        "Dataset size: %.2f MB", sum(path.stat().st_size for path in markdown_files) / (1024 * 1024)
+    )
 
     return markdown_files
 
@@ -122,6 +123,7 @@ def validate_dataset() -> list[Path]:
 # ---------------------------------------------------------
 # 5. Initialize the vector store
 # ---------------------------------------------------------
+
 
 def create_vector_store() -> ChromaVectorStore:
     """Create or open the persistent ChromaDB collection."""
@@ -139,13 +141,36 @@ def create_vector_store() -> ChromaVectorStore:
     return vector_store
 
 
+def backup_chroma_directory() -> Path | None:
+    """Create a timestamped backup of the existing ChromaDB directory."""
+
+    if not CHROMA_DIR.exists():
+        logger.warning("No existing ChromaDB directory found. Backup skipped.")
+        return None
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    backup_dir = CHROMA_DIR.with_name(f"{CHROMA_DIR.name}.backup-{timestamp}")
+
+    logger.info("Creating ChromaDB backup...")
+    logger.info("Backup destination: %s", backup_dir)
+
+    shutil.copytree(CHROMA_DIR, backup_dir)
+
+    logger.info("ChromaDB backup completed successfully.")
+
+    return backup_dir
+
+
 # ---------------------------------------------------------
 # 6. Index the dataset
 # ---------------------------------------------------------
 
+
 def index_dataset(
     batch_size: int = 32,
     reset: bool = False,
+    sync: bool = False,
 ) -> None:
     """Load, clean, chunk, embed, and index the JKLU dataset."""
 
@@ -159,6 +184,10 @@ def index_dataset(
     markdown_files = validate_dataset()
 
     # Initialize persistent vector storage.
+    if sync:
+        backup_chroma_directory()
+
+    # Initialize persistent vector storage.
     vector_store = create_vector_store()
 
     initial_count = vector_store.count()
@@ -168,8 +197,7 @@ def index_dataset(
     # Reset only when explicitly requested.
     if reset:
         logger.warning(
-            "Reset requested. Removing existing records from "
-            "the '%s' collection.",
+            "Reset requested. Removing existing records from the '%s' collection.",
             COLLECTION_NAME,
         )
 
@@ -180,12 +208,11 @@ def index_dataset(
             vector_store.count(),
         )
 
-    elif initial_count > 0:
+    elif initial_count > 0 and not sync:
         logger.warning(
             "The collection already contains %d vectors. "
-            "Existing records will not be deleted. If the dataset "
-            "has changed, obsolete chunks may remain. Use --reset "
-            "only if you intentionally want to rebuild this collection.",
+            "Existing records will not be deleted. "
+            "Use --sync to remove obsolete chunks from processed sources.",
             initial_count,
         )
 
@@ -208,7 +235,10 @@ def index_dataset(
     logger.info("Starting indexing...")
     logger.info("Batch size: %d", batch_size)
 
-    report = indexer.index_directory(SOURCE_DIR)
+    report = indexer.index_directory(
+        SOURCE_DIR,
+        sync=sync,
+    )
 
     final_count = vector_store.count()
 
@@ -226,6 +256,8 @@ def index_dataset(
     logger.info("Chunks indexed:             %d", report.chunks_indexed)
     logger.info("Vectors before indexing:    %d", initial_count)
     logger.info("Vectors after indexing:     %d", final_count)
+    logger.info("Chunks deleted:             %d", report.chunks_deleted)
+    logger.info("Sources synchronized:       %d", report.sources_synced)
 
     logger.info("Persistent storage: %s", CHROMA_DIR.resolve())
     logger.info("Collection: %s", COLLECTION_NAME)
@@ -235,14 +267,10 @@ def index_dataset(
     # -----------------------------------------------------
 
     if report.documents_loaded == 0:
-        raise RuntimeError(
-            "No documents were loaded. Check the dataset and loader."
-        )
+        raise RuntimeError("No documents were loaded. Check the dataset and loader.")
 
     if report.chunks_created == 0:
-        raise RuntimeError(
-            "No chunks were created. Check the ingestion pipeline."
-        )
+        raise RuntimeError("No chunks were created. Check the ingestion pipeline.")
 
     if report.chunks_indexed != report.chunks_created:
         raise RuntimeError(
@@ -251,9 +279,7 @@ def index_dataset(
         )
 
     if final_count == 0:
-        raise RuntimeError(
-            "ChromaDB contains no vectors after indexing."
-        )
+        raise RuntimeError("ChromaDB contains no vectors after indexing.")
 
     logger.info("=" * 60)
     logger.info("INDEXING COMPLETED SUCCESSFULLY")
@@ -264,6 +290,7 @@ def index_dataset(
 # 9. Main entry point
 # ---------------------------------------------------------
 
+
 def main() -> None:
     """Run the indexing process."""
 
@@ -273,15 +300,16 @@ def main() -> None:
         index_dataset(
             batch_size=args.batch_size,
             reset=args.reset,
+            sync=args.sync,
         )
 
     except KeyboardInterrupt:
         logger.warning("Indexing interrupted by the user.")
-        raise SystemExit(130)
+        raise SystemExit(130) from None
 
     except Exception:
         logger.exception("Indexing failed.")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -19,9 +19,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from jklu_compass.embeddings.encoder import EmbeddingEncoder
-from jklu_compass.vectorstore.chroma_store import ChromaVectorStore
-
+from jklu_compass.embeddings.encoder import EmbeddingEncoder  # noqa: E402
+from jklu_compass.vectorstore.chroma_store import ChromaVectorStore  # noqa: E402
 
 CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"
 COLLECTION_NAME = "jklu_compass"
@@ -36,9 +35,7 @@ SAMPLE_QUERIES = [
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Test semantic retrieval for JKLU Compass."
-    )
+    parser = argparse.ArgumentParser(description="Test semantic retrieval for JKLU Compass.")
 
     parser.add_argument(
         "--top-k",
@@ -70,8 +67,7 @@ def main() -> None:
 
     if not CHROMA_DIR.exists():
         raise SystemExit(
-            f"ChromaDB directory not found: {CHROMA_DIR}\n"
-            "Run scripts/index_jklu_dataset.py first."
+            f"ChromaDB directory not found: {CHROMA_DIR}\nRun scripts/index_jklu_dataset.py first."
         )
 
     print("=" * 72)
@@ -89,9 +85,7 @@ def main() -> None:
     print(f"Stored vectors: {vector_count}")
 
     if vector_count == 0:
-        raise SystemExit(
-            "The vector store is empty. Index the dataset before testing."
-        )
+        raise SystemExit("The vector store is empty. Index the dataset before testing.")
 
     print("\nLoading embedding model...")
 

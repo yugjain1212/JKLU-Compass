@@ -1,4 +1,3 @@
-
 """Split source documents into Markdown-aware overlapping chunks."""
 
 from __future__ import annotations
@@ -9,10 +8,7 @@ from dataclasses import dataclass, field
 
 from jklu_compass.ingestion.loaders import SourceDocument
 
-
-_HEADING_PATTERN = re.compile(
-    r"^\s{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$"
-)
+_HEADING_PATTERN = re.compile(r"^\s{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _FENCE_PATTERN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 
 
@@ -84,13 +80,23 @@ class DocumentChunker:
                     content=content,
                 )
 
+                metadata = dict(document.metadata)
+                if heading_path:
+                    metadata.update(
+                        {
+                            "heading_path": list(heading_path),
+                            "section_title": heading_path[-1].lstrip("#").strip(),
+                            "heading_level": len(heading_path[-1].split(" ")[0]),
+                        }
+                    )
+
                 chunks.append(
                     DocumentChunk(
                         chunk_id=chunk_id,
                         content=content,
                         source=document.source,
                         chunk_index=chunk_index,
-                        metadata=dict(document.metadata),
+                        metadata=metadata,
                     )
                 )
 
@@ -128,10 +134,7 @@ class DocumentChunker:
 
                 if fence_marker is None:
                     fence_marker = marker
-                elif (
-                    marker[0] == fence_marker[0]
-                    and len(marker) >= len(fence_marker)
-                ):
+                elif marker[0] == fence_marker[0] and len(marker) >= len(fence_marker):
                     fence_marker = None
 
                 current_lines.append(line)
@@ -180,10 +183,7 @@ class DocumentChunker:
         context = "\n".join(heading_path)
 
         if context and len(context) > self.config.chunk_size // 2:
-            # Keep the closest heading when the full hierarchy is too long.
-            context = heading_path[-1][
-                : self.config.chunk_size // 2
-            ]
+            context = heading_path[-1][: self.config.chunk_size // 2]
 
         if not body.strip():
             return [context[: self.config.chunk_size]] if context else []
@@ -270,8 +270,8 @@ class DocumentChunker:
         content: str,
     ) -> str:
         """Generate a deterministic ID for a chunk."""
-        fingerprint = hashlib.sha256(
-            f"{source}\0{chunk_index}\0{content}".encode()
-        ).hexdigest()[:16]
+        fingerprint = hashlib.sha256(f"{source}\0{chunk_index}\0{content}".encode()).hexdigest()[
+            :16
+        ]
 
         return f"chunk_{fingerprint}"

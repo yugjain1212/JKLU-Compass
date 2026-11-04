@@ -55,30 +55,20 @@ class LocalLLM:
             data = response.json()
 
         except requests.exceptions.ConnectionError as exc:
-            raise LocalLLMError(
-                "Cannot connect to Ollama. Make sure Ollama is running."
-            ) from exc
+            raise LocalLLMError("Cannot connect to Ollama. Make sure Ollama is running.") from exc
 
         except requests.exceptions.Timeout as exc:
-            raise LocalLLMError(
-                f"Ollama timed out after {self.timeout} seconds."
-            ) from exc
+            raise LocalLLMError(f"Ollama timed out after {self.timeout} seconds.") from exc
 
         except requests.exceptions.HTTPError as exc:
-            raise LocalLLMError(
-                f"Ollama returned an HTTP error: {exc}"
-            ) from exc
+            raise LocalLLMError(f"Ollama returned an HTTP error: {exc}") from exc
 
         except requests.exceptions.RequestException as exc:
-            raise LocalLLMError(
-                f"Request to Ollama failed: {exc}"
-            ) from exc
+            raise LocalLLMError(f"Request to Ollama failed: {exc}") from exc
 
         generated_text = data.get("response", "")
 
         if not isinstance(generated_text, str) or not generated_text.strip():
-            raise LocalLLMError(
-                "Ollama returned an empty response."
-            )
+            raise LocalLLMError("Ollama returned an empty response.")
 
-        return generated_text.strip() 
+        return generated_text.strip()

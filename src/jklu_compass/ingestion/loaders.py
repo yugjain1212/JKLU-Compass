@@ -101,11 +101,7 @@ def _parse_markdown_front_matter(
             continue
 
         # Remove matching quotes around simple YAML scalar values.
-        if (
-            len(value) >= 2
-            and value[0] == value[-1]
-            and value[0] in {"'", '"'}
-        ):
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1].strip()
 
         if not value:
@@ -129,9 +125,7 @@ class DocumentLoader:
         source_path = Path(path).expanduser()
 
         if not source_path.exists():
-            raise FileNotFoundError(
-                f"Input path does not exist: {source_path}"
-            )
+            raise FileNotFoundError(f"Input path does not exist: {source_path}")
 
         if source_path.is_file():
             suffix = source_path.suffix.lower()
@@ -148,9 +142,7 @@ class DocumentLoader:
             )
 
         if not source_path.is_dir():
-            raise ValueError(
-                f"Input path is not a regular file or directory: {source_path}"
-            )
+            raise ValueError(f"Input path is not a regular file or directory: {source_path}")
 
         return self.load_markdown_directory(source_path)
 
@@ -159,9 +151,7 @@ class DocumentLoader:
         jsonl_path = Path(path).expanduser()
 
         if not jsonl_path.is_file():
-            raise FileNotFoundError(
-                f"JSONL file does not exist: {jsonl_path}"
-            )
+            raise FileNotFoundError(f"JSONL file does not exist: {jsonl_path}")
 
         report = LoadReport(files_seen=1)
 
@@ -177,16 +167,14 @@ class DocumentLoader:
                 except json.JSONDecodeError as exc:
                     self._record_error(
                         report,
-                        f"{jsonl_path}:{line_number}: "
-                        f"Invalid JSON: {exc.msg}",
+                        f"{jsonl_path}:{line_number}: Invalid JSON: {exc.msg}",
                     )
                     continue
 
                 if not isinstance(record, dict):
                     self._record_error(
                         report,
-                        f"{jsonl_path}:{line_number}: "
-                        "Expected a JSON object.",
+                        f"{jsonl_path}:{line_number}: Expected a JSON object.",
                     )
                     continue
 
@@ -215,9 +203,7 @@ class DocumentLoader:
         markdown_path = Path(path).expanduser()
 
         if not markdown_path.is_file():
-            raise FileNotFoundError(
-                f"Markdown file does not exist: {markdown_path}"
-            )
+            raise FileNotFoundError(f"Markdown file does not exist: {markdown_path}")
 
         if markdown_path.suffix.lower() not in MARKDOWN_EXTENSIONS:
             raise ValueError(f"Not a Markdown file: {markdown_path}")
@@ -225,9 +211,7 @@ class DocumentLoader:
         report = LoadReport(files_seen=1, records_seen=1)
 
         try:
-            content = markdown_path.read_text(
-                encoding="utf-8-sig"
-            ).strip()
+            content = markdown_path.read_text(encoding="utf-8-sig").strip()
         except UnicodeDecodeError as exc:
             self._record_error(
                 report,
@@ -275,10 +259,7 @@ class DocumentLoader:
         markdown_files = sorted(
             file_path
             for file_path in directory.rglob("*")
-            if (
-                file_path.is_file()
-                and file_path.suffix.lower() in MARKDOWN_EXTENSIONS
-            )
+            if (file_path.is_file() and file_path.suffix.lower() in MARKDOWN_EXTENSIONS)
         )
 
         for markdown_path in markdown_files:
@@ -286,9 +267,7 @@ class DocumentLoader:
             report.records_seen += 1
 
             try:
-                content = markdown_path.read_text(
-                    encoding="utf-8-sig"
-                ).strip()
+                content = markdown_path.read_text(encoding="utf-8-sig").strip()
             except UnicodeDecodeError as exc:
                 report.records_skipped += 1
                 self._record_error(
@@ -347,9 +326,7 @@ class DocumentLoader:
                 break
 
         if content is None:
-            logger.warning(
-                "Skipping record without a recognized text field."
-            )
+            logger.warning("Skipping record without a recognized text field.")
             return None
 
         source = default_source
@@ -364,8 +341,7 @@ class DocumentLoader:
         metadata = {
             key: value
             for key, value in record.items()
-            if key not in TEXT_FIELDS
-            and isinstance(value, (str, int, float, bool))
+            if key not in TEXT_FIELDS and isinstance(value, (str, int, float, bool))
         }
         metadata["source_type"] = "jsonl"
 

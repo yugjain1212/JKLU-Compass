@@ -2,7 +2,6 @@
 
 from jklu_compass.retrieval.retriever import DocumentRetriever
 
-
 QUESTIONS = [
     "What academic programs does JKLU offer?",
     "What does JKLU's M.Des program focus on?",
