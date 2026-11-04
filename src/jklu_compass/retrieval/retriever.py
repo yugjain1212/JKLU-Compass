@@ -74,7 +74,7 @@ class DocumentRetriever:
         query: str,
         top_k: int = 5,
     ) -> list[RetrievalResult]:
-        """Retrieve and fuse dense and lexical candidates using RRF."""
+        """Retrieve and rank relevant chunks using dense and lexical search."""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")
 
@@ -84,13 +84,13 @@ class DocumentRetriever:
         query = query.strip()
         candidate_k = top_k * self.candidate_multiplier
 
+        # 1. Dense retrieval
         query_embedding = self.encoder.encode(query)
         dense_records = self.vector_store.search(
             query_embedding=query_embedding.tolist(),
             top_k=candidate_k,
         )
 
-        # Convert dense results into the common result representation.
         results_by_id: dict[str, RetrievalResult] = {}
         source_keys: dict[str, str] = {}
 
@@ -99,7 +99,7 @@ class DocumentRetriever:
             results_by_id[result.id] = result
             source_keys[result.id] = source_key
 
-        # If BM25 is available, merge both ranked lists using RRF.
+        # 2. Hybrid retrieval using BM25 and Reciprocal Rank Fusion
         if self.bm25_retriever is not None:
             lexical_results = self.bm25_retriever.retrieve(
                 query,
@@ -110,17 +110,17 @@ class DocumentRetriever:
 
             rrf_scores: dict[str, float] = defaultdict(float)
 
-            # Dense ranking contribution.
             for rank, record in enumerate(dense_records, start=1):
                 record_id = str(record["id"])
                 rrf_scores[record_id] += 1.0 / (self.rrf_k + rank)
 
-            # BM25 ranking contribution.
-            for rank, lexical_result in enumerate(lexical_results, start=1):
+            for rank, lexical_result in enumerate(
+                lexical_results,
+                start=1,
+            ):
                 record_id = lexical_result.id
                 rrf_scores[record_id] += 1.0 / (self.rrf_k + rank)
 
-                # Add BM25-only candidates to the result pool.
                 if record_id not in results_by_id:
                     record = lexical_records.get(record_id)
 
@@ -149,8 +149,7 @@ class DocumentRetriever:
             ]
 
         else:
-            # Preserve the existing dense-only fallback for stores without
-            # a lexical corpus, including lightweight test doubles.
+            # Dense-only fallback
             query_terms = self._query_terms(query)
 
             candidates = [(result, source_keys[result.id]) for result in results_by_id.values()]
@@ -163,12 +162,32 @@ class DocumentRetriever:
                 reverse=True,
             )
 
-        # Apply source diversity only after ranking and fusion.
+        # 3. Structured programme retrieval
+        # Programme sections from the same brochure must not be discarded
+        # by the generic source-diversity filter.
+        if self.bm25_retriever is not None and self._is_btech_programme_query(query):
+            get_programmes = getattr(
+                self.bm25_retriever,
+                "get_btech_programme_records",
+                None,
+            )
+
+            if callable(get_programmes):
+                programme_records = get_programmes()
+
+                programme_results = [
+                    self._build_result(record, distance=1.0)[0] for record in programme_records
+                ]
+
+                if programme_results:
+                    return programme_results[:top_k]
+
+        # 4. Generic source-diversity selection
         results: list[RetrievalResult] = []
         source_counts: dict[str, int] = defaultdict(int)
         selected_ids: set[str] = set()
 
-        # Pass 1: one result per distinct source.
+        # First pass: prefer one result per source.
         for result, source_key in candidates:
             if source_counts[source_key] != 0:
                 continue
@@ -180,14 +199,14 @@ class DocumentRetriever:
             if len(results) >= top_k:
                 return results
 
-        # Pass 2: permit additional chunks from local files and PDF sources.
+        # Second pass: allow additional chunks from PDFs and local files
+        # when the first pass did not fill the requested result count.
         for result, source_key in candidates:
             if result.id in selected_ids:
                 continue
 
             is_pdf = self._is_pdf_source(result)
 
-            # Ordinary web pages remain limited to one result per URL.
             if source_key.startswith(("http://", "https://")) and not is_pdf:
                 continue
 
@@ -204,6 +223,33 @@ class DocumentRetriever:
                 break
 
         return results
+
+    @staticmethod
+    def _is_btech_programme_query(query: str) -> bool:
+        """Identify queries asking for B.Tech programmes or specialisations."""
+        normalized = query.lower()
+
+        mentions_btech = bool(
+            re.search(
+                r"\bb\.?\s*tech\b|\bbachelor\s+of\s+technology\b",
+                normalized,
+            )
+        )
+
+        asks_for_list = any(
+            term in normalized
+            for term in (
+                "specialisation",
+                "specialization",
+                "programme",
+                "program",
+                "available",
+                "list",
+                "offer",
+            )
+        )
+
+        return mentions_btech and asks_for_list
 
     @staticmethod
     def _is_pdf_source(result: RetrievalResult) -> bool:
