@@ -187,7 +187,11 @@ class DocumentRetriever:
         source_counts: dict[str, int] = defaultdict(int)
         selected_ids: set[str] = set()
 
-        # First pass: prefer one result per source.
+        # First pass: prioritize different sources.
+        # Reserve some slots for additional relevant chunks.
+        reserved_slots = min(2, top_k // 3)
+        diversity_target = max(1, top_k - reserved_slots)
+
         for result, source_key in candidates:
             if source_counts[source_key] != 0:
                 continue
@@ -196,12 +200,15 @@ class DocumentRetriever:
             source_counts[source_key] += 1
             selected_ids.add(result.id)
 
-            if len(results) >= top_k:
-                return results
+            if len(results) >= diversity_target:
+                break
 
-        # Second pass: allow additional chunks from PDFs and local files
-        # when the first pass did not fill the requested result count.
+        # Second pass: allow additional chunks from PDFs and local files.
+        # Keep HTML webpages limited to one chunk per canonical source.
         for result, source_key in candidates:
+            if len(results) >= top_k:
+                break
+
             if result.id in selected_ids:
                 continue
 
@@ -218,9 +225,6 @@ class DocumentRetriever:
             results.append(result)
             source_counts[source_key] += 1
             selected_ids.add(result.id)
-
-            if len(results) >= top_k:
-                break
 
         return results
 
