@@ -6,7 +6,10 @@ import re
 from dataclasses import dataclass
 
 from jklu_compass.generation.local_llm import LocalLLM
-from jklu_compass.rag.structured_extractor import StructuredExtractor
+from jklu_compass.rag.structured_extractor import (
+    StructuredExtractor,
+    StructuredItem,
+)
 from jklu_compass.retrieval.retriever import DocumentRetriever, RetrievalResult
 
 
@@ -21,6 +24,22 @@ class SourceCitation:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuredProgramme:
+    """A B.Tech programme with its supporting source citation."""
+
+    name: str
+    source_number: int
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredAnswer:
+    """Machine-readable data extracted from retrieved evidence."""
+
+    answer_type: str
+    programmes: tuple[StructuredProgramme, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RAGResponse:
     """The generated answer and its supporting sources."""
 
@@ -28,6 +47,7 @@ class RAGResponse:
     answer: str
     sources: tuple[SourceCitation, ...]
     retrieved_chunks: int
+    structured_data: StructuredAnswer | None = None
 
 
 class RAGPipeline:
@@ -58,6 +78,7 @@ class RAGPipeline:
             question,
             top_k=self.top_k,
         )
+
         structured_items = (
             StructuredExtractor.extract_btech_programmes(results)
             if self._is_btech_programme_question(question)
@@ -80,6 +101,22 @@ class RAGPipeline:
                 sources=(),
                 retrieved_chunks=len(results),
             )
+        # Use deterministic rendering for verified B.Tech programme lists.
+        structured_data = self._build_structured_answer(
+            structured_items,
+            citations,
+        )
+
+        if structured_data is not None:
+            answer = self._render_structured_answer(structured_data)
+
+            return RAGResponse(
+                question=question,
+                answer=answer,
+                sources=tuple(citations),
+                retrieved_chunks=len(results),
+                structured_data=structured_data,
+            )
 
         prompt = self._build_prompt(
             question,
@@ -92,17 +129,14 @@ class RAGPipeline:
             temperature=0.1,
         )
 
+        # Validate completeness for structured B.Tech questions.
         if structured_items:
             missing_items = self._find_missing_programmes(
                 answer,
                 structured_items,
             )
-            print(
-                f"\n[DEBUG] Initial answer missing "
-                f"{len(missing_items)} programme(s): "
-                f"{[item.name for item in missing_items]}"
-            )
 
+            # Retry generation once if any programme is missing.
             if missing_items:
                 retry_prompt = self._build_completeness_retry_prompt(
                     question=question,
@@ -121,32 +155,82 @@ class RAGPipeline:
                     answer,
                     structured_items,
                 )
-                print(
-                    f"\n[DEBUG] Retry answer missing "
-                    f"{len(missing_items)} programme(s): "
-                    f"{[item.name for item in missing_items]}"
-                )
 
+                # Deterministic fallback if the retry is still incomplete.
                 if missing_items:
                     answer = self._append_missing_programmes(
                         answer,
                         missing_items,
                         citations,
                     )
-                    print(f"[DEBUG] Fallback applied. Answer length: {len(answer)}")
+
+        # Build machine-readable response data.
+        structured_data = self._build_structured_answer(
+            structured_items,
+            citations,
+        )
 
         return RAGResponse(
             question=question,
             answer=answer,
             sources=tuple(citations),
             retrieved_chunks=len(results),
+            structured_data=structured_data,
+        )
+
+    @staticmethod
+    def _build_structured_answer(
+        items: list[StructuredItem],
+        citations: list[SourceCitation],
+    ) -> StructuredAnswer | None:
+        """Build programme data with valid source references."""
+
+        if not items:
+            return None
+
+        citation_by_chunk = {citation.chunk_id: citation.number for citation in citations}
+
+        programmes = tuple(
+            StructuredProgramme(
+                name=item.name,
+                source_number=citation_by_chunk[item.chunk_id],
+            )
+            for item in items
+            if item.chunk_id in citation_by_chunk
+        )
+
+        if not programmes:
+            return None
+
+        return StructuredAnswer(
+            answer_type="btech_programme_list",
+            programmes=programmes,
+        )
+
+    @staticmethod
+    def _render_structured_answer(data: StructuredAnswer) -> str:
+        """Render a verified B.Tech programme list without LLM generation."""
+
+        programme_lines = [
+            f"{index}. {programme.name} [Source {programme.source_number}]"
+            for index, programme in enumerate(data.programmes, start=1)
+        ]
+
+        programme_list = "\n".join(programme_lines)
+
+        return (
+            "The retrieved JKLU engineering brochure lists the following "
+            "B.Tech programmes:\n\n"
+            f"{programme_list}\n\n"
+            "Note: This reflects the indexed brochure and does not "
+            "independently confirm the current admissions catalogue."
         )
 
     @staticmethod
     def _find_missing_programmes(
         answer: str,
-        items: list,
-    ) -> list:
+        items: list[StructuredItem],
+    ) -> list[StructuredItem]:
         """Find programme names missing from the generated answer."""
 
         missing = []
@@ -167,7 +251,7 @@ class RAGPipeline:
         context: str,
         structured_context: str,
         previous_answer: str,
-        missing_items: list,
+        missing_items: list[StructuredItem],
     ) -> str:
         """Ask the LLM to correct an incomplete programme list."""
 
@@ -215,7 +299,7 @@ ANSWER:
     @staticmethod
     def _append_missing_programmes(
         answer: str,
-        missing_items: list,
+        missing_items: list[StructuredItem],
         citations: list[SourceCitation],
     ) -> str:
         """Append omitted programme names with their source citations."""
@@ -311,7 +395,7 @@ ANSWER:
 
     @staticmethod
     def _build_structured_context(
-        items: list,
+        items: list[StructuredItem],
     ) -> str:
         """Format structured programme evidence for the LLM."""
 

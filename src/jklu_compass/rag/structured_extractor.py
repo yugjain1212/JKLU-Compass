@@ -30,6 +30,8 @@ class StructuredExtractor:
         seen: set[str] = set()
 
         for result in results:
+            if not result.content.strip():
+                continue
             metadata = result.metadata or {}
 
             heading_path = metadata.get("heading_path", [])

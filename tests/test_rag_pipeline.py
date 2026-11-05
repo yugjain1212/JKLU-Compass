@@ -5,6 +5,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from jklu_compass.rag.pipeline import RAGPipeline
+from jklu_compass.rag.structured_extractor import (
+    StructuredExtractor,
+    StructuredItem,
+)
 from jklu_compass.retrieval.retriever import RetrievalResult
 
 
@@ -237,3 +241,82 @@ def test_ask_ignores_invalid_source_titles(
     response = pipeline.ask("Tell me about JKLU.")
 
     assert response.sources[0].title == "Untitled JKLU document"
+
+
+def test_btech_programme_question_uses_deterministic_answer(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render all six verified B.Tech programmes without calling the LLM."""
+
+    programme_names = [
+        "Computer Science and Engineering",
+        "Computer Science and Engineering (Artificial Intelligence)",
+        "Computer Science and Engineering (Data Science)",
+        "Computer Science and Engineering (Cyber Security)",
+        "Computer Science and Design",
+        "Electronics and Communication Engineering (VLSI Design)",
+    ]
+
+    items = [
+        StructuredItem(
+            name=name,
+            chunk_id=f"chunk-{index:03d}",
+            source_url="https://jklu.edu.in/engineering.pdf",
+            source_title="Engineering Brochure",
+        )
+        for index, name in enumerate(programme_names, start=1)
+    ]
+
+    retrieved_results = [
+        RetrievalResult(
+            id=item.chunk_id,
+            content=f"JKLU B.Tech programme: {item.name}",
+            title=item.source_title,
+            source_url=item.source_url,
+            source="/data/engineering.md",
+            distance=0.1 + index * 0.01,
+            metadata={"section_title": item.name},
+        )
+        for index, item in enumerate(items)
+    ]
+
+    retriever.retrieve.return_value = retrieved_results
+
+    monkeypatch.setattr(
+        StructuredExtractor,
+        "extract_btech_programmes",
+        staticmethod(lambda results: items),
+    )
+
+    response = pipeline.ask("What B.Tech specialisations are available at JKLU?")
+
+    # The deterministic path must bypass LLM generation.
+    llm.generate.assert_not_called()
+
+    # Verify structured response.
+    assert response.structured_data is not None
+    assert response.structured_data.answer_type == "btech_programme_list"
+
+    structured_programmes = response.structured_data.programmes
+
+    assert len(structured_programmes) == 6
+    assert [programme.name for programme in structured_programmes] == programme_names
+    assert [programme.source_number for programme in structured_programmes] == [1, 2, 3, 4, 5, 6]
+
+    # Verify rendered answer.
+    for index, name in enumerate(programme_names, start=1):
+        expected_line = f"{index}. {name} [Source {index}]"
+        assert response.answer.count(expected_line) == 1
+
+    # Verify citations.
+    assert len(response.sources) == 6
+
+    for index, source in enumerate(response.sources, start=1):
+        assert source.number == index
+        assert source.chunk_id == f"chunk-{index:03d}"
+
+    assert "current admissions catalogue" in response.answer
+    assert response.retrieved_chunks == 6
