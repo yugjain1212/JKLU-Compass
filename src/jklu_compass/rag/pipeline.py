@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from jklu_compass.generation.local_llm import LocalLLM
+from jklu_compass.rag.structured_extractor import StructuredExtractor
 from jklu_compass.retrieval.retriever import DocumentRetriever, RetrievalResult
 
 
@@ -56,6 +58,13 @@ class RAGPipeline:
             question,
             top_k=self.top_k,
         )
+        structured_items = (
+            StructuredExtractor.extract_btech_programmes(results)
+            if self._is_btech_programme_question(question)
+            else []
+        )
+
+        structured_context = self._build_structured_context(structured_items)
 
         context, citations = self._build_context(results)
 
@@ -72,18 +81,191 @@ class RAGPipeline:
                 retrieved_chunks=len(results),
             )
 
-        prompt = self._build_prompt(question, context)
+        prompt = self._build_prompt(
+            question,
+            context,
+            structured_context=structured_context,
+        )
 
         answer = self.llm.generate(
             prompt,
             temperature=0.1,
         )
 
+        if structured_items:
+            missing_items = self._find_missing_programmes(
+                answer,
+                structured_items,
+            )
+            print(
+                f"\n[DEBUG] Initial answer missing "
+                f"{len(missing_items)} programme(s): "
+                f"{[item.name for item in missing_items]}"
+            )
+
+            if missing_items:
+                retry_prompt = self._build_completeness_retry_prompt(
+                    question=question,
+                    context=context,
+                    structured_context=structured_context,
+                    previous_answer=answer,
+                    missing_items=missing_items,
+                )
+
+                answer = self.llm.generate(
+                    retry_prompt,
+                    temperature=0.1,
+                )
+
+                missing_items = self._find_missing_programmes(
+                    answer,
+                    structured_items,
+                )
+                print(
+                    f"\n[DEBUG] Retry answer missing "
+                    f"{len(missing_items)} programme(s): "
+                    f"{[item.name for item in missing_items]}"
+                )
+
+                if missing_items:
+                    answer = self._append_missing_programmes(
+                        answer,
+                        missing_items,
+                        citations,
+                    )
+                    print(f"[DEBUG] Fallback applied. Answer length: {len(answer)}")
+
         return RAGResponse(
             question=question,
             answer=answer,
             sources=tuple(citations),
             retrieved_chunks=len(results),
+        )
+
+    @staticmethod
+    def _find_missing_programmes(
+        answer: str,
+        items: list,
+    ) -> list:
+        """Find programme names missing from the generated answer."""
+
+        missing = []
+
+        for item in items:
+            # Avoid treating a specialised programme as the
+            # general programme when its name is a prefix.
+            pattern = re.escape(item.name) + r"(?!\s*\()"
+
+            if not re.search(pattern, answer, flags=re.IGNORECASE):
+                missing.append(item)
+
+        return missing
+
+    @staticmethod
+    def _build_completeness_retry_prompt(
+        question: str,
+        context: str,
+        structured_context: str,
+        previous_answer: str,
+        missing_items: list,
+    ) -> str:
+        """Ask the LLM to correct an incomplete programme list."""
+
+        missing_names = "\n".join(
+            f"- {item.name} [Chunk ID: {item.chunk_id}]" for item in missing_items
+        )
+
+        return f"""You are correcting an incomplete answer for JKLU Compass.
+
+The previous answer omitted one or more verified B.Tech programmes.
+
+ORIGINAL QUESTION:
+{question}
+
+PREVIOUS ANSWER:
+{previous_answer}
+
+MISSING PROGRAMMES THAT MUST BE INCLUDED:
+{missing_names}
+
+VERIFIED STRUCTURED EVIDENCE:
+{structured_context}
+
+REFERENCE PASSAGES:
+<context>
+{context}
+</context>
+
+INSTRUCTIONS:
+1. Produce a complete corrected answer to the original question.
+2. Include every programme in the verified structured evidence.
+3. Preserve the exact programme names.
+4. Do not omit the general B.Tech programme.
+5. Do not merge specialised programmes into the general programme.
+6. Use only the supplied reference passages.
+7. Cite each factual statement using the supplied [Source N] labels.
+8. Do not invent programme descriptions or citations.
+9. Keep the answer concise and use a bullet list.
+
+Return the complete corrected answer, not just the missing items.
+
+ANSWER:
+"""
+
+    @staticmethod
+    def _append_missing_programmes(
+        answer: str,
+        missing_items: list,
+        citations: list[SourceCitation],
+    ) -> str:
+        """Append omitted programme names with their source citations."""
+
+        citation_by_chunk = {citation.chunk_id: citation.number for citation in citations}
+
+        additions = []
+
+        for item in missing_items:
+            source_number = citation_by_chunk.get(item.chunk_id)
+
+            if source_number is None:
+                continue
+
+            additions.append(f"- {item.name} [Source {source_number}]")
+
+        if not additions:
+            return answer
+
+        section = (
+            "\n\n### Additional programmes supported by the "
+            "retrieved documents\n\n" + "\n".join(additions)
+        )
+
+        return answer.rstrip() + section
+
+    @staticmethod
+    def _is_btech_programme_question(question: str) -> bool:
+        """Detect questions asking for B.Tech programme lists."""
+
+        normalized = question.casefold()
+
+        degree_terms = (
+            "b.tech",
+            "btech",
+            "bachelor of technology",
+        )
+
+        list_terms = (
+            "specialisation",
+            "specialization",
+            "programme",
+            "program",
+            "available",
+            "list",
+            "offer",
+        )
+
+        return any(term in normalized for term in degree_terms) and any(
+            term in normalized for term in list_terms
         )
 
     @staticmethod
@@ -128,7 +310,32 @@ class RAGPipeline:
         return "\n\n---\n\n".join(context_parts), citations
 
     @staticmethod
-    def _build_prompt(question: str, context: str) -> str:
+    def _build_structured_context(
+        items: list,
+    ) -> str:
+        """Format structured programme evidence for the LLM."""
+
+        if not items:
+            return ""
+
+        lines = [
+            "VERIFIED STRUCTURED B.TECH PROGRAMME LIST:",
+            "The following programme names were extracted directly "
+            "from retrieved document headings.",
+            "You MUST include every item exactly once.",
+        ]
+
+        for index, item in enumerate(items, start=1):
+            lines.append(f"{index}. {item.name} [Chunk ID: {item.chunk_id}]")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_prompt(
+        question: str,
+        context: str,
+        structured_context: str = "",
+    ) -> str:
         """Build a grounded prompt for JKLU Compass."""
 
         return f"""You are JKLU Compass, an AI assistant for
@@ -154,6 +361,8 @@ GROUNDING RULES:
 10. Do not invent citations or URLs.
 11. If evidence is insufficient, clearly explain what is missing.
 12. Use concise headings and bullet points where appropriate.
+13. When a verified structured list is supplied, include every item
+    exactly once. Do not omit or rename any listed item.
 
 SOURCE HANDLING:
 
@@ -161,6 +370,10 @@ SOURCE HANDLING:
 - Multiple chunks from the same PDF can support different items.
 - Do not discard relevant evidence simply because sources share a URL.
 - Use the source label associated with the evidence for each claim.
+
+STRUCTURED EVIDENCE:
+
+{structured_context or "No structured programme list was extracted."}
 
 REFERENCE PASSAGES:
 
