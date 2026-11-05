@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from jklu_compass.retrieval import DocumentRetriever
+from jklu_compass.retrieval.bm25_retriever import BM25Result
 
 
 @pytest.fixture
@@ -338,6 +339,45 @@ def test_retrieve_keeps_html_source_limit_of_one(
     assert results[0].id == "html-chunk-1"
 
 
+def test_retrieve_allows_query_distinct_second_html_chunk(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = [
+        {
+            "id": "profile",
+            "document": "Dr. Akshat Agrawal is an Associate Professor.",
+            "metadata": {
+                "title": "Faculty Profile",
+                "section_title": "Dr. Akshat Agrawal",
+                "source_url": "https://jklu.edu.in/faculty/akshat-agrawal",
+            },
+            "distance": 0.10,
+        },
+        {
+            "id": "research",
+            "document": "His primary research interests include artificial intelligence.",
+            "metadata": {
+                "title": "Faculty Profile",
+                "section_title": "Research Interests",
+                "source_url": "https://jklu.edu.in/faculty/akshat-agrawal",
+            },
+            "distance": 0.12,
+        },
+    ]
+    retriever = DocumentRetriever(encoder=encoder, vector_store=vector_store)
+    trace: dict[str, Any] = {}
+
+    results = retriever.retrieve(
+        "What are Dr. Akshat Agrawal's primary research interests?",
+        top_k=2,
+        trace=trace,
+    )
+
+    assert [result.id for result in results] == ["profile", "research"]
+    assert trace["selection_reasons"]["research"] == "selected_for_fill"
+
+
 def test_retrieve_respects_configured_pdf_chunk_limit(
     encoder: MagicMock,
     vector_store: MagicMock,
@@ -363,3 +403,55 @@ def test_retrieve_respects_configured_pdf_chunk_limit(
     results = retriever.retrieve("Engineering programme information", top_k=4)
 
     assert len(results) == 3
+
+
+def test_retrieve_trace_handles_missing_bm25_records(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+) -> None:
+    vector_store.search.return_value = []
+    bm25_retriever = MagicMock()
+    bm25_retriever.records = []
+    bm25_retriever.retrieve.return_value = [BM25Result(id="missing", score=1.0)]
+    retriever = DocumentRetriever(
+        encoder=encoder,
+        vector_store=vector_store,
+        bm25_retriever=bm25_retriever,
+    )
+    trace: dict[str, Any] = {}
+
+    assert retriever.retrieve("JKLU fees", trace=trace) == []
+    assert trace["missing_record_ids"] == ["missing"]
+    assert trace["ranked_candidates"] == []
+
+
+def test_retrieve_trace_deduplicates_candidate_ids(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+) -> None:
+    record = {
+        "id": "same-id",
+        "document": "JKLU fee structure information.",
+        "metadata": {"source": "/data/fees.md"},
+        "distance": 0.1,
+    }
+    vector_store.search.return_value = [record, record]
+    bm25_retriever = MagicMock()
+    bm25_retriever.records = [record]
+    bm25_retriever.retrieve.return_value = [
+        BM25Result(id="same-id", score=2.0),
+        BM25Result(id="same-id", score=1.0),
+    ]
+    retriever = DocumentRetriever(
+        encoder=encoder,
+        vector_store=vector_store,
+        bm25_retriever=bm25_retriever,
+    )
+    trace: dict[str, Any] = {}
+
+    results = retriever.retrieve("JKLU fees", top_k=1, trace=trace)
+
+    assert [result.id for result in results] == ["same-id"]
+    assert trace["dense_candidates"] == [{"rank": 1, "id": "same-id"}]
+    assert trace["bm25_candidates"] == [{"rank": 1, "id": "same-id"}]
+    assert trace["ranked_candidates"][0]["rrf_score"] == pytest.approx(2 / 61)

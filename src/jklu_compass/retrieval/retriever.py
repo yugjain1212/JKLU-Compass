@@ -73,6 +73,7 @@ class DocumentRetriever:
         self,
         query: str,
         top_k: int = 5,
+        trace: dict[str, Any] | None = None,
     ) -> list[RetrievalResult]:
         """Retrieve and rank relevant chunks using dense and lexical search."""
         if not isinstance(query, str) or not query.strip():
@@ -84,6 +85,13 @@ class DocumentRetriever:
         query = query.strip()
         candidate_k = top_k * self.candidate_multiplier
 
+        if trace is not None:
+            trace.clear()
+            trace["candidate_k"] = candidate_k
+            trace["selection_mode"] = "source_diversity"
+
+        query_terms = self._query_terms(query)
+
         # 1. Dense retrieval
         query_embedding = self.encoder.encode(query)
         dense_records = self.vector_store.search(
@@ -93,11 +101,20 @@ class DocumentRetriever:
 
         results_by_id: dict[str, RetrievalResult] = {}
         source_keys: dict[str, str] = {}
+        dense_rank_by_id: dict[str, int] = {}
 
-        for record in dense_records:
+        for rank, record in enumerate(dense_records, start=1):
             result, source_key = self._build_result(record)
+            if result.id in dense_rank_by_id:
+                continue
+
+            dense_rank_by_id[result.id] = rank
             results_by_id[result.id] = result
             source_keys[result.id] = source_key
+
+        ranked_candidate_details: list[dict[str, Any]] = []
+        bm25_rank_by_id: dict[str, int] = {}
+        missing_record_ids: list[str] = []
 
         # 2. Hybrid retrieval using BM25 and Reciprocal Rank Fusion
         if self.bm25_retriever is not None:
@@ -110,8 +127,7 @@ class DocumentRetriever:
 
             rrf_scores: dict[str, float] = defaultdict(float)
 
-            for rank, record in enumerate(dense_records, start=1):
-                record_id = str(record["id"])
+            for record_id, rank in dense_rank_by_id.items():
                 rrf_scores[record_id] += 1.0 / (self.rrf_k + rank)
 
             for rank, lexical_result in enumerate(
@@ -119,12 +135,17 @@ class DocumentRetriever:
                 start=1,
             ):
                 record_id = lexical_result.id
+                if record_id in bm25_rank_by_id:
+                    continue
+
+                bm25_rank_by_id[record_id] = rank
                 rrf_scores[record_id] += 1.0 / (self.rrf_k + rank)
 
                 if record_id not in results_by_id:
                     record = lexical_records.get(record_id)
 
                     if record is None:
+                        missing_record_ids.append(record_id)
                         continue
 
                     result, source_key = self._build_result(
@@ -135,7 +156,7 @@ class DocumentRetriever:
                     source_keys[record_id] = source_key
 
             ranked_ids = sorted(
-                rrf_scores,
+                (record_id for record_id in rrf_scores if record_id in results_by_id),
                 key=lambda record_id: (
                     -rrf_scores[record_id],
                     results_by_id[record_id].distance,
@@ -146,6 +167,19 @@ class DocumentRetriever:
                 (results_by_id[record_id], source_keys[record_id])
                 for record_id in ranked_ids
                 if record_id in results_by_id
+            ]
+
+            ranked_candidate_details = [
+                {
+                    "rank": rank,
+                    "id": record_id,
+                    "dense_rank": dense_rank_by_id.get(record_id),
+                    "bm25_rank": bm25_rank_by_id.get(record_id),
+                    "rrf_score": rrf_scores[record_id],
+                    "source_key": source_keys[record_id],
+                    "result": results_by_id[record_id],
+                }
+                for rank, record_id in enumerate(ranked_ids, start=1)
             ]
 
         else:
@@ -161,6 +195,30 @@ class DocumentRetriever:
                 ),
                 reverse=True,
             )
+
+            ranked_candidate_details = [
+                {
+                    "rank": rank,
+                    "id": result.id,
+                    "dense_rank": dense_rank_by_id.get(result.id),
+                    "bm25_rank": None,
+                    "rrf_score": None,
+                    "source_key": source_key,
+                    "result": result,
+                }
+                for rank, (result, source_key) in enumerate(candidates, start=1)
+            ]
+
+        if trace is not None:
+            trace["dense_candidates"] = [
+                {"rank": rank, "id": record_id} for record_id, rank in dense_rank_by_id.items()
+            ]
+            trace["bm25_candidates"] = [
+                {"rank": rank, "id": record_id} for record_id, rank in bm25_rank_by_id.items()
+            ]
+            trace["missing_record_ids"] = missing_record_ids
+            trace["ranked_candidates"] = ranked_candidate_details
+            trace["selection_reasons"] = {}
 
         # 3. Structured programme retrieval
         # Programme sections from the same brochure must not be discarded
@@ -180,12 +238,30 @@ class DocumentRetriever:
                 ]
 
                 if programme_results:
-                    return programme_results[:top_k]
+                    selected_programme_results = programme_results[:top_k]
+                    if trace is not None:
+                        trace["selection_mode"] = "structured_programme"
+                        trace["selected_ids"] = [result.id for result in selected_programme_results]
+                        trace["selection_reasons"] = {
+                            candidate["id"]: (
+                                "selected_structured_programme"
+                                if candidate["id"] in trace["selected_ids"]
+                                else "bypassed_by_structured_programme"
+                            )
+                            for candidate in ranked_candidate_details
+                        }
+                        for candidate in ranked_candidate_details:
+                            candidate["selection_reason"] = trace["selection_reasons"][
+                                candidate["id"]
+                            ]
+                    return selected_programme_results
 
         # 4. Generic source-diversity selection
         results: list[RetrievalResult] = []
         source_counts: dict[str, int] = defaultdict(int)
+        source_query_terms: dict[str, set[str]] = defaultdict(set)
         selected_ids: set[str] = set()
+        selection_reasons: dict[str, str] = {}
 
         # First pass: prioritize different sources.
         # Reserve some slots for additional relevant chunks.
@@ -194,37 +270,74 @@ class DocumentRetriever:
 
         for result, source_key in candidates:
             if source_counts[source_key] != 0:
+                selection_reasons.setdefault(result.id, "deferred_same_source")
                 continue
 
             results.append(result)
             source_counts[source_key] += 1
+            source_query_terms[source_key].update(self._matching_query_terms(query_terms, result))
             selected_ids.add(result.id)
+            selection_reasons[result.id] = "selected_for_diversity"
 
             if len(results) >= diversity_target:
                 break
 
-        # Second pass: allow additional chunks from PDFs and local files.
-        # Keep HTML webpages limited to one chunk per canonical source.
-        for result, source_key in candidates:
-            if len(results) >= top_k:
+        # Fill reserved slots with candidates that add query terms to their source first.
+        while len(results) < top_k:
+            eligible: list[tuple[int, int, RetrievalResult, str, bool, set[str]]] = []
+
+            for rank, (result, source_key) in enumerate(candidates):
+                if result.id in selected_ids:
+                    continue
+
+                is_pdf = self._is_pdf_source(result)
+                source_limit = self.max_chunks_per_pdf if is_pdf else self.max_chunks_per_source
+                if source_counts[source_key] >= source_limit:
+                    selection_reasons[result.id] = "pdf_source_limit" if is_pdf else "source_limit"
+                    continue
+
+                matching_terms = self._matching_query_terms(query_terms, result)
+                new_terms = matching_terms - source_query_terms[source_key]
+                is_html = source_key.startswith(("http://", "https://")) and not is_pdf
+
+                if is_html and source_counts[source_key] and not new_terms:
+                    selection_reasons[result.id] = "html_no_new_query_terms"
+                    continue
+
+                eligible.append((len(new_terms), rank, result, source_key, is_pdf, matching_terms))
+
+            if not eligible:
                 break
 
-            if result.id in selected_ids:
-                continue
-
-            is_pdf = self._is_pdf_source(result)
-
-            if source_key.startswith(("http://", "https://")) and not is_pdf:
-                continue
-
-            source_limit = self.max_chunks_per_pdf if is_pdf else self.max_chunks_per_source
-
-            if source_counts[source_key] >= source_limit:
-                continue
-
+            _, _, result, source_key, _, matching_terms = min(
+                eligible,
+                key=lambda item: (item[1] > 2, -item[0], item[1]),
+            )
             results.append(result)
             source_counts[source_key] += 1
+            source_query_terms[source_key].update(matching_terms)
             selected_ids.add(result.id)
+            selection_reasons[result.id] = "selected_for_fill"
+
+        if trace is not None:
+            for candidate in ranked_candidate_details:
+                candidate_id = candidate["id"]
+                if (
+                    candidate_id not in selected_ids
+                    and selection_reasons.get(candidate_id) == "deferred_same_source"
+                ):
+                    selection_reasons[candidate_id] = (
+                        "not_selected_top_k"
+                        if len(results) >= top_k
+                        else "not_selected_by_source_selection"
+                    )
+                candidate["selection_reason"] = selection_reasons.setdefault(
+                    candidate_id,
+                    "not_selected_top_k",
+                )
+
+            trace["selection_reasons"] = selection_reasons
+            trace["selected_ids"] = [result.id for result in results]
 
         return results
 
@@ -372,6 +485,26 @@ class DocumentRetriever:
             for term in re.findall(r"[a-z0-9]+", query.lower())
             if len(term) > 1 and term not in stop_words
         }
+
+    @staticmethod
+    def _matching_query_terms(
+        query_terms: set[str],
+        result: RetrievalResult,
+    ) -> set[str]:
+        """Return query terms found in a result's content or structural metadata."""
+        metadata = result.metadata
+        searchable_text = " ".join(
+            str(value)
+            for value in (
+                result.title,
+                metadata.get("section_title", ""),
+                metadata.get("heading_path", ""),
+                result.content,
+            )
+            if value
+        ).lower()
+        result_terms = set(re.findall(r"[a-z0-9]+", searchable_text))
+        return query_terms & result_terms
 
     @classmethod
     def _relevance_score(
