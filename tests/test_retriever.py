@@ -242,6 +242,20 @@ def test_retrieve_prioritizes_matching_section_heading(
     assert results[0].id == "programme-1"
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("What B.Tech specialisations are available at JKLU?", True),
+        ("Which B.Tech programmes are listed in the brochure?", True),
+        ("What semester-study opportunities are available to B.Tech students?", False),
+        ("List B.Tech semester exchange opportunities.", False),
+    ],
+)
+def test_btech_programme_list_intent_is_specific(query: str, expected: bool) -> None:
+    """Only explicit programme-list questions use structured retrieval."""
+    assert DocumentRetriever.is_btech_programme_list_query(query) is expected
+
+
 def test_retrieve_applies_source_diversity_after_ranking(
     retriever: DocumentRetriever,
     vector_store: MagicMock,
@@ -284,6 +298,174 @@ def test_retrieve_applies_source_diversity_after_ranking(
     assert len(results) == 2
     assert results[0].id == "programme-1"
     assert results[1].id == "mobility-1"
+
+
+def test_retrieve_prioritizes_exact_degree_fee_evidence(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+) -> None:
+    """Keep the matching degree and year row when source diversity would drop it."""
+    fee_url = "https://jklu.edu.in/admissions/fee-structure"
+    source = "/data/fee-structure.md"
+    generic_fee = {
+        "id": "generic-fee-row",
+        "document": (
+            "### Tuition Fee for Academic Year 2026-27\n"
+            "Academic Fee (Annual): 2,84,000 | Technology Fee (Annual): 10,000"
+        ),
+        "metadata": {
+            "source": source,
+            "source_url": fee_url,
+            "section_title": "Tuition Fee for Academic Year 2026-27",
+            "title": "JKLU Fee Structure",
+        },
+        "distance": 0.10,
+    }
+    exact_fee = {
+        "id": "btech-fee-row",
+        "document": (
+            "### Tuition Fee for Academic Year 2026-27\n"
+            "| Programme: **Bachelor of Technology** | Academic Fee (Annual): 2,84,000 | "
+            "Technology Fee (Annual): 10,000 |"
+        ),
+        "metadata": {
+            "source": source,
+            "source_url": fee_url,
+            "section_title": "Tuition Fee for Academic Year 2026-27",
+            "title": "JKLU Fee Structure",
+        },
+        "distance": 0.12,
+    }
+    unrelated = {
+        "id": "unrelated-programme",
+        "document": "JKLU offers B.Tech programmes and student activities.",
+        "metadata": {
+            "source": "/data/about.md",
+            "source_url": "https://jklu.edu.in/about",
+            "section_title": "About JKLU",
+            "title": "About JKLU",
+        },
+        "distance": 0.14,
+    }
+    vector_store.search.return_value = [generic_fee, unrelated, exact_fee]
+    bm25_retriever = MagicMock()
+    bm25_retriever.records = [generic_fee, unrelated, exact_fee]
+    bm25_retriever.retrieve.return_value = [
+        BM25Result(id="generic-fee-row", score=3.0),
+        BM25Result(id="unrelated-programme", score=2.0),
+        BM25Result(id="btech-fee-row", score=1.0),
+    ]
+    retriever = DocumentRetriever(
+        encoder=encoder,
+        vector_store=vector_store,
+        bm25_retriever=bm25_retriever,
+    )
+    trace: dict[str, Any] = {}
+
+    results = retriever.retrieve(
+        "What is the annual B.Tech academic fee for 2026-27?",
+        top_k=2,
+        trace=trace,
+    )
+
+    assert results[0].id == "btech-fee-row"
+    assert trace["selection_reasons"]["btech-fee-row"] == "selected_degree_fee_evidence"
+
+
+@pytest.mark.parametrize(
+    ("query", "specific_content", "expected_reason"),
+    [
+        (
+            "Which specialised laboratories are listed by JKLU's Institute of Engineering and "
+            "Technology?",
+            "State-of-the-art facilities include the AI Lab, Data Science Lab, Computer Network "
+            "and Cyber Security Lab, AR/VR Lab, Smart Grid Lab, Circuit Design and VLSI Lab, "
+            "Embedded System and IoT Lab, Robotics and Automation Lab, and Software Engineering "
+            "Lab.",
+            "selected_comprehensive_lab_list",
+        ),
+        (
+            "What types of hostel rooms does the JKLU Hostel Life Policy describe?",
+            "The policy offers fully furnished double/Triple occupancy rooms with AC and non-AC "
+            "options.",
+            "selected_hostel_room_type_evidence",
+        ),
+    ],
+)
+def test_retrieve_prioritizes_specific_multi_answer_evidence(
+    encoder: MagicMock,
+    vector_store: MagicMock,
+    query: str,
+    specific_content: str,
+    expected_reason: str,
+) -> None:
+    """Preserve a complete list or room-type passage when diversity would drop it."""
+    source_url = (
+        "https://jklu.edu.in/engineering" if "laborator" in query else "https://jklu.edu.in/hostel"
+    )
+    specific = {
+        "id": "specific-evidence",
+        "document": specific_content,
+        "metadata": {"source_url": source_url, "section_title": "Policy evidence"},
+        "distance": 0.12,
+    }
+    generic = {
+        "id": "generic-same-source",
+        "document": "JKLU facilities provide student support information.",
+        "metadata": {"source_url": source_url, "section_title": "Overview"},
+        "distance": 0.10,
+    }
+    unrelated = {
+        "id": "unrelated-source",
+        "document": "JKLU campus information and academic opportunities.",
+        "metadata": {"source_url": "https://jklu.edu.in/about", "section_title": "About"},
+        "distance": 0.11,
+    }
+    vector_store.search.return_value = [generic, unrelated, specific]
+    bm25_retriever = MagicMock()
+    bm25_retriever.records = [generic, unrelated, specific]
+    bm25_retriever.retrieve.return_value = [
+        BM25Result(id="generic-same-source", score=3.0),
+        BM25Result(id="unrelated-source", score=2.0),
+        BM25Result(id="specific-evidence", score=1.0),
+    ]
+    retriever = DocumentRetriever(
+        encoder=encoder,
+        vector_store=vector_store,
+        bm25_retriever=bm25_retriever,
+    )
+    trace: dict[str, Any] = {}
+
+    results = retriever.retrieve(query, top_k=2, trace=trace)
+
+    assert results[0].id == "specific-evidence"
+    assert trace["selection_reasons"]["specific-evidence"] == expected_reason
+
+
+def test_specific_lab_question_does_not_prioritize_a_multi_lab_inventory() -> None:
+    """A question about one lab's equipment needs that lab's detailed chunk."""
+    retriever = DocumentRetriever(
+        encoder=MagicMock(),
+        vector_store=MagicMock(),
+    )
+    candidate = retriever._build_result(
+        {
+            "id": "lab-inventory",
+            "document": (
+                "The AI Lab, Data Science Lab, Cyber Security Lab, AR/VR Lab, and Smart Grid Lab."
+            ),
+            "metadata": {},
+            "distance": 1.0,
+        },
+    )[0]
+
+    assert (
+        retriever._priority_evidence_reason(
+            "What hardware and platforms are available in the Embedded System and IoT Lab?",
+            candidate,
+        )
+        is None
+    )
 
 
 def test_retrieve_allows_multiple_chunks_from_pdf(

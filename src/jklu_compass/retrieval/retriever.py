@@ -223,7 +223,7 @@ class DocumentRetriever:
         # 3. Structured programme retrieval
         # Programme sections from the same brochure must not be discarded
         # by the generic source-diversity filter.
-        if self.bm25_retriever is not None and self._is_btech_programme_query(query):
+        if self.bm25_retriever is not None and self.is_btech_programme_list_query(query):
             get_programmes = getattr(
                 self.bm25_retriever,
                 "get_btech_programme_records",
@@ -262,6 +262,24 @@ class DocumentRetriever:
         source_query_terms: dict[str, set[str]] = defaultdict(set)
         selected_ids: set[str] = set()
         selection_reasons: dict[str, str] = {}
+
+        priority_evidence = next(
+            (
+                (result, source_key, reason)
+                for result, source_key in candidates
+                if (reason := self._priority_evidence_reason(query, result)) is not None
+            ),
+            None,
+        )
+        if priority_evidence is not None:
+            result, source_key, reason = priority_evidence
+            results.append(result)
+            source_counts[source_key] += 1
+            source_query_terms[source_key].update(self._matching_query_terms(query_terms, result))
+            selected_ids.add(result.id)
+            selection_reasons[result.id] = reason
+            if trace is not None:
+                trace["selection_mode"] = "answer_specific_evidence_priority"
 
         # First pass: prioritize different sources.
         # Reserve some slots for additional relevant chunks.
@@ -341,32 +359,125 @@ class DocumentRetriever:
 
         return results
 
-    @staticmethod
-    def _is_btech_programme_query(query: str) -> bool:
-        """Identify queries asking for B.Tech programmes or specialisations."""
-        normalized = query.lower()
+    @classmethod
+    def _priority_evidence_reason(cls, query: str, result: RetrievalResult) -> str | None:
+        """Return a narrow evidence-priority reason for known list and fee intents."""
+        if cls._is_degree_fee_evidence(query, result):
+            return "selected_degree_fee_evidence"
 
+        if cls._is_comprehensive_lab_list(query, result):
+            return "selected_comprehensive_lab_list"
+
+        if cls._is_hostel_room_type_evidence(query, result):
+            return "selected_hostel_room_type_evidence"
+
+        return None
+
+    @classmethod
+    def _is_degree_fee_evidence(cls, query: str, result: RetrievalResult) -> bool:
+        """Prioritize a fee chunk matching the requested degree and academic year."""
+        if not re.search(r"\b(?:fees?|tuition|costs?|charges?)\b", query, re.I):
+            return False
+        if re.search(
+            r"\b(?:hostel|accommodation|transport|mess|registration|application)\s+fees?\b",
+            query,
+            re.I,
+        ):
+            return False
+
+        degree_patterns = {
+            "btech": r"\b(?:b\.?\s*tech|bachelor\s+of\s+technology)\b",
+            "bdes": r"\b(?:b\.?\s*des|bachelor\s+of\s+design)\b",
+            "mtech": r"\b(?:m\.?\s*tech|master\s+of\s+technology)\b",
+            "mdes": r"\b(?:m\.?\s*des|master\s+of\s+design)\b",
+            "bba": r"\b(?:bba|bachelor\s+of\s+business(?:\s+administration)?)\b",
+            "mba": r"\b(?:mba|master\s+of\s+business(?:\s+administration)?)\b",
+        }
+        requested_degrees = {
+            degree for degree, pattern in degree_patterns.items() if re.search(pattern, query, re.I)
+        }
+        if len(requested_degrees) != 1:
+            return False
+
+        searchable_text = " ".join(
+            str(value)
+            for value in (
+                result.content,
+                result.metadata.get("section_title", ""),
+                result.metadata.get("heading_path", ""),
+            )
+            if value
+        )
+        target_degree = next(iter(requested_degrees))
+        if not re.search(degree_patterns[target_degree], searchable_text, re.I):
+            return False
+        if not re.search(r"\b(?:academic|technology|tuition)\s+fees?\b", searchable_text, re.I):
+            return False
+        if not re.search(r"\d[\d,]{3,}", result.content):
+            return False
+
+        requested_years = cls._academic_years(query)
+        candidate_years = cls._academic_years(searchable_text)
+        return not requested_years or bool(requested_years & candidate_years)
+
+    @staticmethod
+    def _is_comprehensive_lab_list(query: str, result: RetrievalResult) -> bool:
+        """Prefer a chunk that enumerates several labs for a lab-list question."""
+        if not re.search(r"\b(?:which|what|list|name|all)\b", query, re.I):
+            return False
+        if not re.search(r"\blabs\b|\blaborator(?:ies)\b", query, re.I):
+            return False
+        lab_mentions = re.findall(r"\b(?:lab|laborator(?:y|ies))\b", result.content, re.I)
+        return len(lab_mentions) >= 5
+
+    @staticmethod
+    def _is_hostel_room_type_evidence(query: str, result: RetrievalResult) -> bool:
+        """Prefer explicit occupancy and AC options for hostel room-type questions."""
+        if not re.search(r"\bhostel\b", query, re.I):
+            return False
+        if not re.search(r"\broom(?:s)?\b", query, re.I) or not re.search(
+            r"\btypes?\b", query, re.I
+        ):
+            return False
+        content = result.content.casefold()
+        has_occupancy = bool(
+            re.search(r"\b(?:single|double|triple)\b.{0,40}\boccupancy\b", content)
+        )
+        has_ac_options = bool(re.search(r"\b(?:non[-\s]*ac|ac\s+and\s+non[-\s]*ac)\b", content))
+        return has_occupancy and has_ac_options
+
+    @staticmethod
+    def _academic_years(text: str) -> set[str]:
+        """Normalize year ranges such as 2026–27 and 2026/2027."""
+        return {
+            f"{start}-{end[-2:]}"
+            for start, end in re.findall(r"\b(20\d{2})\s*[-–—/]\s*(\d{2,4})\b", text)
+        }
+
+    @staticmethod
+    def is_btech_programme_list_query(query: str) -> bool:
+        """Identify explicit requests for B.Tech course or specialisation lists."""
+        normalized = query.casefold().replace("–", "-").replace("—", "-")
         mentions_btech = bool(
             re.search(
                 r"\bb\.?\s*tech\b|\bbachelor\s+of\s+technology\b",
                 normalized,
             )
         )
-
-        asks_for_list = any(
-            term in normalized
-            for term in (
-                "specialisation",
-                "specialization",
-                "programme",
-                "program",
-                "available",
-                "list",
-                "offer",
+        asks_about_mobility = bool(
+            re.search(
+                r"\b(?:semester|exchange|mobility|opportunit(?:y|ies)|study abroad)\b",
+                normalized,
+            )
+        )
+        names_a_programme_list = bool(
+            re.search(
+                r"\b(?:speciali[sz]ations?|programmes?|programs?|courses?|degrees?|majors?)\b",
+                normalized,
             )
         )
 
-        return mentions_btech and asks_for_list
+        return mentions_btech and names_a_programme_list and not asks_about_mobility
 
     @staticmethod
     def _is_pdf_source(result: RetrievalResult) -> bool:

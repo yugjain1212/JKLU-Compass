@@ -173,6 +173,8 @@ def test_ask_includes_grounding_instructions(
     assert "Never invent university facts" in prompt
     assert "reference passages as evidence" in prompt
     assert "Do not invent citations or URLs" in prompt
+    assert "include only information for that degree" in prompt
+    assert "Only claim a requested academic year" in prompt
     assert "Engineering Brochure" in prompt
     assert "Design Brochure" in prompt
 
@@ -320,3 +322,213 @@ def test_btech_programme_question_uses_deterministic_answer(
 
     assert "current admissions catalogue" in response.answer
     assert response.retrieved_chunks == 6
+
+
+def test_btech_semester_opportunity_question_uses_normal_generation(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    sample_results: list[RetrievalResult],
+) -> None:
+    """Do not mistake semester mobility for a B.Tech programme-list query."""
+    retriever.retrieve.return_value = sample_results
+    extract = MagicMock(return_value=[])
+    monkeypatch.setattr(StructuredExtractor, "extract_btech_programmes", staticmethod(extract))
+
+    response = pipeline.ask("What semester-study opportunities are available to B.Tech students?")
+
+    extract.assert_not_called()
+    llm.generate.assert_called_once()
+    assert response.structured_data is None
+    assert (
+        response.question == "What semester-study opportunities are available to B.Tech students?"
+    )
+    assert [source.chunk_id for source in response.sources] == ["chunk-001"]
+
+
+def test_single_degree_question_omits_mixed_degree_context(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+) -> None:
+    """Keep the prompt focused when a single-degree chunk is available."""
+    retriever.retrieve.return_value = [
+        RetrievalResult(
+            id="btech-fee",
+            content="B.Tech annual academic fee is INR 284000.",
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.1,
+            metadata={"section_title": "Bachelor of Technology"},
+        ),
+        RetrievalResult(
+            id="combined-fees",
+            content=(
+                "# Fee Structure\n"
+                "### Tuition Fee for Academic Year 2026-27\n"
+                "| Programme | Academic Fee (Annual) | Technology Fee (Annual) |\n"
+                "| --- | --- | --- |\n"
+                "| Programme: **Bachelor of Design** | 3,51,000 | 30,000 |\n"
+                "| Programme: **Bachelor of Technology** | 2,84,000 | 10,000 |"
+            ),
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.12,
+            metadata={},
+        ),
+        RetrievalResult(
+            id="bdes-fee",
+            content="B.Des annual academic fee is INR 351000.",
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.14,
+            metadata={"section_title": "Bachelor of Design"},
+        ),
+        RetrievalResult(
+            id="btech-scholarship",
+            content="B.Tech scholarship eligibility for Class XII students.",
+            title="Scholarship Aid",
+            source_url="https://jklu.edu.in/scholarship",
+            source="/data/scholarship.md",
+            distance=0.16,
+            metadata={"section_title": "B.Tech Scholarship"},
+        ),
+    ]
+
+    response = pipeline.ask("What is the annual B.Tech academic fee for 2026-27?")
+
+    llm.generate.assert_not_called()
+    assert response.answer == (
+        "For academic year 2026–27, B.Tech annual academic fee: ₹2,84,000 [Source 1]"
+    )
+    assert [source.chunk_id for source in response.sources] == ["combined-fees"]
+    assert response.retrieved_chunks == 4
+
+
+def test_generic_annual_degree_fee_returns_available_fee_fields(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+) -> None:
+    """A general annual-fee question can return both explicit fee fields."""
+    retriever.retrieve.return_value = [
+        RetrievalResult(
+            id="btech-fees",
+            content=(
+                "### Academic Year 2026-27\n"
+                "Programme: Bachelor of Technology\n"
+                "Academic Fee (Annual): 2,84,000\n"
+                "Technology Fee (Annual): 10,000"
+            ),
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.1,
+            metadata={},
+        ),
+    ]
+
+    response = pipeline.ask("What are the annual B.Tech fees for 2026-27?")
+
+    llm.generate.assert_not_called()
+    assert response.answer == (
+        "For academic year 2026–27, B.Tech annual fees:\n"
+        "- Annual academic fee: ₹2,84,000 [Source 1]\n"
+        "- Annual technology fee: ₹10,000 [Source 1]"
+    )
+    assert [source.chunk_id for source in response.sources] == ["btech-fees"]
+
+
+def test_yearless_fee_answer_discloses_the_source_year(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+) -> None:
+    """Do not present a dated fee as current when the user omitted a year."""
+    retriever.retrieve.return_value = [
+        RetrievalResult(
+            id="dated-btech-fee",
+            content=(
+                "### Academic Year 2026-27\n"
+                "Programme: Bachelor of Technology\n"
+                "Academic Fee (Annual): 2,84,000"
+            ),
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.1,
+            metadata={},
+        ),
+    ]
+
+    response = pipeline.ask("What is the B.Tech annual academic fee?")
+
+    llm.generate.assert_not_called()
+    assert response.answer == (
+        "For academic year 2026–27, B.Tech annual academic fee: ₹2,84,000 [Source 1]"
+    )
+
+
+def test_multi_year_fee_question_does_not_render_one_year_as_the_answer(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+) -> None:
+    """Keep year comparisons in the generation path instead of dropping a year."""
+    retriever.retrieve.return_value = [
+        RetrievalResult(
+            id="multi-year-fees",
+            content=(
+                "Programme: Bachelor of Technology\n"
+                "2025-26 Academic Fee (Annual): 2,50,000\n"
+                "2026-27 Academic Fee (Annual): 2,84,000"
+            ),
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.1,
+            metadata={},
+        ),
+    ]
+
+    pipeline.ask("What were B.Tech academic fees in 2025-26 and 2026-27?")
+
+    llm.generate.assert_called_once()
+    prompt = llm.generate.call_args.args[0]
+    assert "2025-26 Academic Fee" in prompt
+    assert "2026-27 Academic Fee" in prompt
+
+
+def test_degree_comparison_keeps_both_degrees_in_context(
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+) -> None:
+    """Preserve mixed degree evidence when the user asks for a comparison."""
+    retriever.retrieve.return_value = [
+        RetrievalResult(
+            id="combined-fees",
+            content="B.Tech fee is INR 284000. B.Des fee is INR 351000.",
+            title="Fee Structure",
+            source_url="https://jklu.edu.in/fees",
+            source="/data/fees.md",
+            distance=0.12,
+            metadata={},
+        )
+    ]
+
+    response = pipeline.ask("Compare the annual B.Tech and B.Des academic fees.")
+
+    prompt = llm.generate.call_args.args[0]
+    assert "B.Tech fee is INR 284000" in prompt
+    assert "B.Des fee is INR 351000" in prompt
+    assert response.sources[0].chunk_id == "combined-fees"
+
+
+def test_academic_year_labels_are_normalized() -> None:
+    """Accept short and full academic-year suffixes and dash variants."""
+    assert RAGPipeline._academic_years("2025–2026, 2026/27") == {"2025-26", "2026-27"}

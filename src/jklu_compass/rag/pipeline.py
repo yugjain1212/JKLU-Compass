@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from jklu_compass.generation.local_llm import LocalLLM
 from jklu_compass.rag.structured_extractor import (
@@ -11,6 +11,33 @@ from jklu_compass.rag.structured_extractor import (
     StructuredItem,
 )
 from jklu_compass.retrieval.retriever import DocumentRetriever, RetrievalResult
+
+DEGREE_PATTERNS = {
+    "btech": re.compile(r"\b(?:b\.?\s*tech|bachelor\s+of\s+technology)\b", re.IGNORECASE),
+    "bdes": re.compile(r"\b(?:b\.?\s*des|bachelor\s+of\s+design)\b", re.IGNORECASE),
+    "mtech": re.compile(r"\b(?:m\.?\s*tech|master\s+of\s+technology)\b", re.IGNORECASE),
+    "mdes": re.compile(r"\b(?:m\.?\s*des|master\s+of\s+design)\b", re.IGNORECASE),
+    "bba": re.compile(r"\b(?:bba|bachelor\s+of\s+business(?:\s+administration)?)\b", re.IGNORECASE),
+    "mba": re.compile(r"\b(?:mba|master\s+of\s+business(?:\s+administration)?)\b", re.IGNORECASE),
+}
+FEE_AMOUNT_PATTERNS = {
+    "academic": re.compile(
+        r"\bacademic\s+fee(?:\s*\(annual\))?\s*:\s*\*{0,2}\s*(?:-\s*)?(?:INR|₹)?\s*([\d,]+)",
+        re.IGNORECASE,
+    ),
+    "technology": re.compile(
+        r"\btechnology\s+fee(?:\s*\(annual\))?\s*:\s*\*{0,2}\s*(?:-\s*)?(?:INR|₹)?\s*([\d,]+)",
+        re.IGNORECASE,
+    ),
+}
+DEGREE_LABELS = {
+    "btech": "B.Tech",
+    "bdes": "B.Des",
+    "mtech": "M.Tech",
+    "mdes": "M.Des",
+    "bba": "BBA",
+    "mba": "MBA",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,16 +105,17 @@ class RAGPipeline:
             question,
             top_k=self.top_k,
         )
+        context_results = self._scope_results_to_question(question, results)
 
         structured_items = (
-            StructuredExtractor.extract_btech_programmes(results)
-            if self._is_btech_programme_question(question)
+            StructuredExtractor.extract_btech_programmes(context_results)
+            if DocumentRetriever.is_btech_programme_list_query(question)
             else []
         )
 
         structured_context = self._build_structured_context(structured_items)
 
-        context, citations = self._build_context(results)
+        context, citations = self._build_context(context_results)
 
         if not citations:
             return RAGResponse(
@@ -116,6 +144,16 @@ class RAGPipeline:
                 sources=tuple(citations),
                 retrieved_chunks=len(results),
                 structured_data=structured_data,
+            )
+
+        fee_answer = self._build_structured_fee_answer(question, context_results, citations)
+        if fee_answer is not None:
+            answer, fee_citations = fee_answer
+            return RAGResponse(
+                question=question,
+                answer=answer,
+                sources=fee_citations,
+                retrieved_chunks=len(results),
             )
 
         prompt = self._build_prompt(
@@ -326,31 +364,261 @@ ANSWER:
 
         return answer.rstrip() + section
 
+    @classmethod
+    def _scope_results_to_question(
+        cls,
+        question: str,
+        results: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """Prefer evidence for one named degree and the requested fee fields."""
+        is_fee_question = bool(re.search(r"\b(?:fees?|tuition|costs?|charges?)\b", question, re.I))
+        is_comparison = bool(
+            re.search(r"\b(?:compare|comparison|versus|vs\.?|between|difference)\b", question, re.I)
+        )
+        asks_about_scholarship = bool(re.search(r"\b(?:scholarship|eligibility)\b", question, re.I))
+        if is_comparison or (is_fee_question and asks_about_scholarship):
+            return results
+
+        question_degrees = cls._degree_mentions(question)
+        if len(question_degrees) != 1:
+            return results
+
+        target_degree = next(iter(question_degrees))
+        requested_fee_fields = {
+            field
+            for field in ("academic", "technology", "tuition", "hostel", "transport")
+            if re.search(rf"\b{field}\s+fees?\b", question, re.I)
+        }
+        target_results: list[RetrievalResult] = []
+        focused_results: list[RetrievalResult] = []
+        fee_results: list[RetrievalResult] = []
+        focused_fee_results: list[RetrievalResult] = []
+
+        for result in results:
+            searchable_text = " ".join(
+                str(value)
+                for value in (
+                    result.content,
+                    result.metadata.get("section_title", ""),
+                    result.metadata.get("heading_path", ""),
+                )
+                if value
+            )
+            mentioned_degrees = cls._degree_mentions(searchable_text)
+
+            if target_degree not in mentioned_degrees:
+                continue
+
+            target_results.append(result)
+            searchable_lower = searchable_text.casefold()
+            if not is_fee_question:
+                has_requested_fee_field = False
+            elif requested_fee_fields:
+                has_requested_fee_field = any(
+                    re.search(rf"\b{field}\s+fees?\b", searchable_lower)
+                    for field in requested_fee_fields
+                )
+            else:
+                has_requested_fee_field = bool(
+                    re.search(
+                        r"\b(?:academic|technology|tuition|hostel|transport|annual)\s+fees?\b"
+                        r"|\bfee structure\b",
+                        searchable_lower,
+                    )
+                )
+
+            if has_requested_fee_field:
+                if mentioned_degrees == {target_degree}:
+                    fee_results.append(result)
+                    focused_fee_results.append(result)
+                else:
+                    scoped_content = cls._filter_content_to_degree(
+                        result.content,
+                        target_degree,
+                    )
+                    if scoped_content and cls._has_requested_fee_field(
+                        scoped_content,
+                        requested_fee_fields,
+                    ):
+                        fee_results.append(replace(result, content=scoped_content))
+            if mentioned_degrees == {target_degree}:
+                focused_results.append(result)
+
+        if is_fee_question:
+            requested_years = cls._academic_years(question)
+            year_specific_results = [
+                result
+                for result in fee_results
+                if requested_years & cls._academic_years(result.content)
+            ]
+            if year_specific_results:
+                return year_specific_results
+            # Mixed tables are reduced to the target row; other fee topics are dropped.
+            return (
+                focused_fee_results or fee_results or focused_results or target_results or results
+            )
+
+        return focused_results or target_results or results
+
+    @classmethod
+    def _filter_content_to_degree(cls, content: str, target_degree: str) -> str | None:
+        """Keep shared context and lines that mention only the target degree."""
+        filtered_lines = []
+        for line in content.splitlines():
+            mentioned_degrees = cls._degree_mentions(line)
+            if not mentioned_degrees or mentioned_degrees == {target_degree}:
+                filtered_lines.append(line)
+
+        scoped_content = "\n".join(filtered_lines).strip()
+        if target_degree not in cls._degree_mentions(scoped_content):
+            return None
+        return scoped_content
+
     @staticmethod
-    def _is_btech_programme_question(question: str) -> bool:
-        """Detect questions asking for B.Tech programme lists."""
-
-        normalized = question.casefold()
-
-        degree_terms = (
-            "b.tech",
-            "btech",
-            "bachelor of technology",
+    def _has_requested_fee_field(content: str, fields: set[str]) -> bool:
+        """Check whether a passage contains a fee field requested by the user."""
+        normalized = content.casefold()
+        if fields:
+            return any(re.search(rf"\b{field}\s+fees?\b", normalized) for field in fields)
+        return bool(
+            re.search(
+                r"\b(?:academic|technology|tuition|hostel|transport|annual)\s+fees?\b"
+                r"|\bfee structure\b",
+                normalized,
+            )
         )
 
-        list_terms = (
-            "specialisation",
-            "specialization",
-            "programme",
-            "program",
-            "available",
-            "list",
-            "offer",
-        )
+    @staticmethod
+    def _academic_years(text: str) -> set[str]:
+        """Normalize academic-year labels such as 2026–27 and 2026/2027."""
+        return {
+            f"{start}-{end[-2:]}"
+            for start, end in re.findall(r"\b(20\d{2})\s*[-–—/]\s*(\d{2,4})\b", text)
+        }
 
-        return any(term in normalized for term in degree_terms) and any(
-            term in normalized for term in list_terms
-        )
+    @classmethod
+    def _build_structured_fee_answer(
+        cls,
+        question: str,
+        results: list[RetrievalResult],
+        citations: list[SourceCitation],
+    ) -> tuple[str, tuple[SourceCitation, ...]] | None:
+        """Render requested annual degree fees when one passage states them together."""
+        if not re.search(r"\b(?:fees?|tuition|costs?|charges?)\b", question, re.I):
+            return None
+        if re.search(
+            r"\b(?:scholarship|eligibility|compare|comparison|versus|vs\.?|between|difference)\b",
+            question,
+            re.I,
+        ):
+            return None
+
+        degree_mentions = cls._degree_mentions(question)
+        if len(degree_mentions) != 1:
+            return None
+
+        requested_fields = {
+            field
+            for field in FEE_AMOUNT_PATTERNS
+            if re.search(rf"\b{field}\s+fees?\b", question, re.I)
+        }
+        if "academic" not in requested_fields and re.search(r"\btuition\s+fees?\b", question, re.I):
+            requested_fields.add("academic")
+        if re.search(
+            r"\b(?:hostel|accommodation|transport|mess|registration|application)\b",
+            question,
+            re.I,
+        ):
+            return None
+        if not requested_fields:
+            requested_fields = set(FEE_AMOUNT_PATTERNS)
+
+        target_degree = next(iter(degree_mentions))
+        citation_by_chunk = {citation.chunk_id: citation for citation in citations}
+        requested_years = cls._academic_years(question)
+        if len(requested_years) > 1:
+            return None
+
+        for result in results:
+            citation = citation_by_chunk.get(result.id)
+            if citation is None or target_degree not in cls._degree_mentions(result.content):
+                continue
+            result_years = cls._academic_years(result.content)
+            if requested_years and result_years != requested_years:
+                continue
+            if not requested_years and len(result_years) != 1:
+                continue
+
+            available_amounts = cls._extract_fee_amounts(result.content, target_degree)
+            amounts = {field: available_amounts.get(field) for field in requested_fields}
+            if not all(amounts.values()):
+                continue
+
+            year = next(iter(requested_years or result_years))
+            year_label = f"For academic year {year.replace('-', '–')}, " if year else ""
+            degree_label = DEGREE_LABELS[target_degree]
+            if len(amounts) == 1:
+                field, amount = next(iter(amounts.items()))
+                field_label = "academic fee" if field == "academic" else "technology fee"
+                return (
+                    f"{year_label}{degree_label} annual {field_label}: "
+                    f"₹{amount} [Source {citation.number}]",
+                    (citation,),
+                )
+
+            lines = [f"{year_label}{degree_label} annual fees:"]
+            for field in ("academic", "technology"):
+                amount = amounts.get(field)
+                if amount is not None:
+                    label = "academic fee" if field == "academic" else "technology fee"
+                    lines.append(f"- Annual {label}: ₹{amount} [Source {citation.number}]")
+
+            return "\n".join(lines), (citation,)
+
+        return None
+
+    @staticmethod
+    def _degree_mentions(text: str) -> set[str]:
+        """Return recognized degree names mentioned in text."""
+        return {degree for degree, pattern in DEGREE_PATTERNS.items() if pattern.search(text)}
+
+    @classmethod
+    def _extract_fee_amounts(cls, content: str, target_degree: str) -> dict[str, str]:
+        """Extract annual fee amounts from labelled text or a degree fee table row."""
+        amounts = {
+            field: match.group(1)
+            for field, pattern in FEE_AMOUNT_PATTERNS.items()
+            if (match := pattern.search(content))
+        }
+        if len(amounts) == len(FEE_AMOUNT_PATTERNS):
+            return amounts
+
+        lines = content.splitlines()
+        for index, line in enumerate(lines):
+            headers = [cell.strip().casefold() for cell in line.split("|")]
+            field_columns = {
+                field: column
+                for column, header in enumerate(headers)
+                for field in FEE_AMOUNT_PATTERNS
+                if re.search(rf"\b{field}\s+fees?\b", header)
+            }
+            if not field_columns:
+                continue
+
+            for row in lines[index + 1 :]:
+                if "|" not in row:
+                    break
+                cells = [cell.strip() for cell in row.split("|")]
+                if cls._degree_mentions(row) != {target_degree}:
+                    continue
+                for field, column in field_columns.items():
+                    if column < len(cells):
+                        match = re.search(r"(?:INR|₹)?\s*([\d,]+)", cells[column], re.I)
+                        if match:
+                            amounts[field] = match.group(1)
+                break
+
+        return amounts
 
     @staticmethod
     def _build_context(
@@ -443,9 +711,17 @@ GROUNDING RULES:
 9. Cite factual statements using the exact labels provided,
    such as [Source 1].
 10. Do not invent citations or URLs.
-11. If evidence is insufficient, clearly explain what is missing.
-12. Use concise headings and bullet points where appropriate.
-13. When a verified structured list is supplied, include every item
+11. If the requested fact is missing or conflicting, state that directly.
+    Do not invent hypothetical caveats about unasked factors.
+12. If the question asks about one degree, include only information for that degree.
+    Omit other degree programmes even if they appear in the reference passages.
+13. Do not add scholarship, eligibility, or unrelated fee details unless asked.
+14. For a direct factual question, answer directly and stop when it is answered.
+15. Only claim a requested academic year when the evidence explicitly matches it.
+    Do not infer applicability from undated or older fee figures.
+16. Keep the answer concise. Do not add a comparison or summary table unless requested.
+17. Use concise headings and bullet points where appropriate.
+18. When a verified structured list is supplied, include every item
     exactly once. Do not omit or rename any listed item.
 
 SOURCE HANDLING:
