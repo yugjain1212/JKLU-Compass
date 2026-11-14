@@ -2,7 +2,9 @@
 
 JKLU Compass is a local-first retrieval-augmented generation (RAG) assistant for questions about JK Lakshmipat University. It searches a curated university knowledge base, drafts an answer with a local Ollama model, and returns references to the sources used.
 
-This repository currently exposes a FastAPI service; it does not include a web frontend. A populated local ChromaDB collection and a running Ollama model are required to answer questions.
+This project contains the JKLU Compass FastAPI backend and its React/Vite chat frontend. The Python backend lives at the repository root, and the web client lives in `frontend/`. The Vite development server proxies `/api` requests to the backend at `127.0.0.1:8000`.
+
+A populated local ChromaDB collection and a running Ollama model are required to answer university questions.
 
 ## What it does
 
@@ -92,10 +94,26 @@ If you already have the prepared Chroma database, place it at `data/chroma` and 
 ### 4. Run the API
 
 ```bash
-uvicorn jklu_compass.api.main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn --app-dir src jklu_compass.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 The server starts on `http://127.0.0.1:8000`. Interactive API documentation is available at [`/docs`](http://127.0.0.1:8000/docs) and [`/redoc`](http://127.0.0.1:8000/redoc).
+
+The `--app-dir src` option makes the source-layout package importable when starting
+the API from the repository root, including when the editable install is not active.
+
+### 5. Run the frontend
+
+In a second terminal, from the repository root:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the local URL printed by Vite (normally `http://localhost:5173`). Keep the API
+running in the first terminal so chat requests can reach it.
 
 ## API
 
@@ -119,6 +137,21 @@ The request accepts a `question` string from 1 to 2,000 characters. The response
 - `sources`: source number, title, URL (when available), and chunk ID.
 - `retrieved_chunks`: number of passages retrieved for the question.
 - `structured_data`: optional machine-readable programme data for supported structured answers.
+
+For follow-up questions in a chat, the request may also include up to eight recent
+messages as `history` entries with `role` (`user` or `assistant`) and `content` fields.
+The service uses this history only to resolve references such as "their" or "that";
+university facts still need support from the indexed documents.
+
+```json
+{
+  "question": "What are their qualifications?",
+  "history": [
+    {"role": "user", "content": "Tell me about IET faculty Akshit Agarwal."},
+    {"role": "assistant", "content": "Dr. Akshat Agrawal is an Associate Professor at IET."}
+  ]
+}
+```
 
 The query endpoint returns HTTP 503 when the local Ollama model is unavailable.
 

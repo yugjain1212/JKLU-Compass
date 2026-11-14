@@ -150,7 +150,12 @@ def create_app(
         """Answer a question using the existing RAG pipeline."""
         pipeline: RAGPipeline = request.app.state.rag_pipeline
 
-        result = pipeline.ask(payload.question)
+        history = [(turn.role, turn.content) for turn in payload.history]
+        result = (
+            pipeline.ask(payload.question, history=history)
+            if history
+            else pipeline.ask(payload.question)
+        )
 
         structured_data = None
 

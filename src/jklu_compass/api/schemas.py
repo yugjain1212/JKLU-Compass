@@ -1,6 +1,23 @@
 """Pydantic schemas for the JKLU Compass API."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
+
+
+class ConversationTurn(BaseModel):
+    """One recent message used only to resolve chat follow-ups."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Conversation content must not be empty.")
+        return value
 
 
 class QueryRequest(BaseModel):
@@ -13,6 +30,7 @@ class QueryRequest(BaseModel):
         description="Question about JKLU.",
         examples=["What B.Tech specialisations are available at JKLU?"],
     )
+    history: list[ConversationTurn] = Field(default_factory=list, max_length=8)
 
     @field_validator("question")
     @classmethod
