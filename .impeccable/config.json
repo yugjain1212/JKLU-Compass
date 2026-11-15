@@ -1,0 +1,20 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "geist",
+        "createdAt": "2026-11-14T15:01:45.942Z",
+        "reason": "User asked to preserve the existing chat design; Geist is the established interface font across the chat surface."
+      },
+      {
+        "rule": "overused-font",
+        "value": "geist mono",
+        "createdAt": "2026-11-14T15:01:51.044Z",
+        "reason": "User asked to preserve the existing chat design; Geist Mono is the established face for keyboard hints and inline code."
+      }
+    ]
+  }
+}

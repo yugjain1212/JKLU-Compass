@@ -1,7 +1,8 @@
 """Tests for the JKLU Compass RAG pipeline."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from jklu_compass.rag.pipeline import RAGPipeline
@@ -217,6 +218,50 @@ def test_ask_normalizes_question_whitespace(
         "What programmes does JKLU offer?",
         top_k=5,
     )
+
+
+@patch("jklu_compass.rag.pipeline.httpx.get")
+def test_current_vc_uses_indexed_official_source_when_live_fetch_is_blocked(
+    mock_get: MagicMock,
+    pipeline: RAGPipeline,
+    retriever: MagicMock,
+    llm: MagicMock,
+) -> None:
+    """Do not let a blocked live page produce a guessed VC answer."""
+    mock_get.side_effect = httpx.HTTPStatusError(
+        "Forbidden",
+        request=httpx.Request("GET", "https://jklu.edu.in/about-us/leadership-governance"),
+        response=httpx.Response(403),
+    )
+    retriever.retrieve.return_value = [
+        RetrievalResult(
+            id="current-vc",
+            content=(
+                "# Vice Chancellor's Message\n\n"
+                "### Prof. Vijaysekhar Chellaboina\n\n"
+                "Vice-Chancellor, JK Lakshmipat University"
+            ),
+            title="Vice-Chancellor's Message | JK Lakshmipat University",
+            source_url="https://jklu.edu.in/about-us/leadership-insights/vc-message",
+            source="/data/vc-message.md",
+            distance=0.1,
+        )
+    ]
+
+    response = pipeline.ask("I want to know about current VC of JKLU")
+
+    assert response.answer == (
+        "JKLU's current Vice-Chancellor is Prof. Vijaysekhar Chellaboina [Source 1]."
+    )
+    assert response.sources[0].url == (
+        "https://jklu.edu.in/about-us/leadership-insights/vc-message"
+    )
+    assert response.retrieved_chunks == 1
+    retriever.retrieve.assert_called_once_with(
+        "current Vice-Chancellor JKLU leadership",
+        top_k=5,
+    )
+    llm.generate.assert_not_called()
 
 
 def test_ask_ignores_invalid_source_titles(

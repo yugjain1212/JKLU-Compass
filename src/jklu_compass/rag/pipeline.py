@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from html import unescape
+
+import httpx
 
 from jklu_compass.generation.local_llm import LocalLLM
 from jklu_compass.rag.structured_extractor import (
@@ -47,6 +50,28 @@ FOLLOW_UP_PATTERN = re.compile(
     r"|\bthere\s+(?:qualifications?|education|degrees?)\b"
     r"|\b(?:what about|how about|tell me more|more about|and also|and what|and how)\b",
     re.IGNORECASE,
+)
+CURRENT_VC_QUERY = re.compile(
+    r"\b(?:current|currently|now|today|present(?:ly)?)\b.{0,80}"
+    r"\b(?:vice[\s-]?chancellor|v\.?\s*c\.?)\b"
+    r"|\b(?:vice[\s-]?chancellor|v\.?\s*c\.?)\b.{0,80}"
+    r"\b(?:current|currently|now|today|present(?:ly)?)\b"
+    r"|\bwho\s+(?:is|are)\s+(?:(?:the|jklu's?)\s+)?"
+    r"(?:vice[\s-]?chancellor|v\.?\s*c\.?)\b",
+    re.IGNORECASE,
+)
+LIVE_VC_NAME_PATTERN = re.compile(
+    r"(?P<name>(?:Professor|Prof\.?|Dr\.?)\s+"
+    r"[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,4})"
+    r"\s+(?:\|\s*)?Vice[\s-]?Chancellor\b"
+)
+LIVE_VC_URL = "https://jklu.edu.in/about-us/leadership-governance"
+LIVE_VC_TITLE = "Leadership & Governance | JK Lakshmipat University"
+INDEXED_VC_URLS = frozenset(
+    {
+        LIVE_VC_URL,
+        "https://jklu.edu.in/about-us/leadership-insights/vc-message",
+    }
 )
 QUESTION_PART_SEPARATOR = re.compile(
     r"\s+(?:and\s+(?:also\s+)?|also\s+)"
@@ -149,6 +174,9 @@ class RAGPipeline:
                 sources=(),
                 retrieved_chunks=0,
             )
+
+        if CURRENT_VC_QUERY.search(question):
+            return self._answer_current_vc(question)
 
         if self._requires_reference(question) and not self._subject_history(history):
             return RAGResponse(
@@ -282,6 +310,96 @@ class RAGPipeline:
             retrieved_chunks=len(results),
             structured_data=structured_data,
         )
+
+    def _answer_current_vc(self, question: str) -> RAGResponse:
+        """Resolve current VC questions from JKLU's live leadership page."""
+        citation = SourceCitation(
+            number=1,
+            title=LIVE_VC_TITLE,
+            url=LIVE_VC_URL,
+            chunk_id="live-jklu-leadership-governance",
+        )
+        name: str | None = None
+
+        try:
+            response = httpx.get(
+                LIVE_VC_URL,
+                follow_redirects=True,
+                timeout=5.0,
+                headers={"User-Agent": "JKLU Compass"},
+            )
+            response.raise_for_status()
+
+            if response.url.host.casefold() in {"jklu.edu.in", "www.jklu.edu.in"}:
+                page_html = re.sub(
+                    r"(?is)<(script|style|noscript)\b[^>]*>.*?</\1\s*>",
+                    " ",
+                    response.text,
+                )
+                page_text = unescape(re.sub(r"(?s)<[^>]+>", " ", page_html))
+                page_text = re.sub(r"\s+", " ", page_text)
+                match = LIVE_VC_NAME_PATTERN.search(page_text)
+                if match:
+                    name = match.group("name")
+        except httpx.HTTPError:
+            pass
+
+        if name is None:
+            name, citation = self._indexed_current_vc()
+
+        if name:
+            answer = f"JKLU's current Vice-Chancellor is {name} [Source 1]."
+            retrieved_chunks = 1
+        else:
+            answer = (
+                "I couldn't verify JKLU's current Vice-Chancellor from its live leadership page. "
+                "Please check [Source 1]."
+            )
+            retrieved_chunks = 0
+
+        return RAGResponse(
+            question=question,
+            answer=answer,
+            sources=(citation,),
+            retrieved_chunks=retrieved_chunks,
+        )
+
+    def _indexed_current_vc(self) -> tuple[str | None, SourceCitation]:
+        """Use the indexed official VC page when Cloudflare blocks the live request."""
+        fallback_citation = SourceCitation(
+            number=1,
+            title=LIVE_VC_TITLE,
+            url=LIVE_VC_URL,
+            chunk_id="live-jklu-leadership-governance",
+        )
+
+        try:
+            results = self.retriever.retrieve(
+                "current Vice-Chancellor JKLU leadership",
+                top_k=self.top_k,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None, fallback_citation
+
+        for result in results:
+            if result.source_url not in INDEXED_VC_URLS:
+                continue
+
+            match = LIVE_VC_NAME_PATTERN.search(result.content)
+            if match is None:
+                continue
+
+            return (
+                match.group("name"),
+                SourceCitation(
+                    number=1,
+                    title=result.title,
+                    url=result.source_url,
+                    chunk_id=result.id,
+                ),
+            )
+
+        return None, fallback_citation
 
     @staticmethod
     def _small_talk_answer(question: str) -> str | None:

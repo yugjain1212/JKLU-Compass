@@ -1,4 +1,4 @@
-import { Fragment, useState, useRef, useEffect, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useState, useRef, useLayoutEffect, type KeyboardEvent, type ReactNode } from "react";
 import "./ChatHome.css";
 
 interface SourceCitation {
@@ -110,12 +110,36 @@ export function ChatHome() {
   const [typing, setTyping] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const shouldFollowRef = useRef(true);
+  const autoScrollRef = useRef(false);
   const sendingRef = useRef(false);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  useLayoutEffect(() => {
+    const container = chatScrollRef.current;
+    if (!container || !shouldFollowRef.current) return;
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const target = Math.max(0, container.scrollHeight - container.clientHeight);
+    autoScrollRef.current = !reducedMotion && target > container.scrollTop + 1;
+    container.scrollTo({ top: target, behavior: reducedMotion ? "auto" : "smooth" });
   }, [messages, typing]);
+
+  function updateScrollPosition() {
+    const container = chatScrollRef.current;
+    if (!container) return;
+
+    const distanceFromBottom = container.scrollHeight - container.clientHeight - container.scrollTop;
+    if (autoScrollRef.current) {
+      if (distanceFromBottom <= 2) autoScrollRef.current = false;
+      return;
+    }
+    shouldFollowRef.current = distanceFromBottom < 96;
+  }
+
+  function interruptAutoScroll() {
+    autoScrollRef.current = false;
+  }
 
   function autoResize() {
     const el = textareaRef.current;
@@ -129,6 +153,7 @@ export function ChatHome() {
     if (!text || sendingRef.current) return;
 
     sendingRef.current = true;
+    shouldFollowRef.current = true;
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     if (view === "home") setView("chat");
@@ -244,7 +269,15 @@ export function ChatHome() {
 
       {/* ── Chat messages (shown after first send) ── */}
       {view === "chat" && (
-        <div className="chat-scroll" style={{ pointerEvents: "all" }}>
+        <div
+          ref={chatScrollRef}
+          className="chat-scroll"
+          style={{ pointerEvents: "all" }}
+          onScroll={updateScrollPosition}
+          onWheel={interruptAutoScroll}
+          onTouchMove={interruptAutoScroll}
+          onPointerDown={interruptAutoScroll}
+        >
           <div className="chat-messages">
             {messages.map((m) => (
               <div key={m.id} className={`msg msg--${m.role}`}>
@@ -294,7 +327,6 @@ export function ChatHome() {
                 </div>
               </div>
             )}
-            <div ref={bottomRef} />
           </div>
         </div>
       )}
