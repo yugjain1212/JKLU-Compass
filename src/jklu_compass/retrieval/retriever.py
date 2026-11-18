@@ -359,16 +359,23 @@ class DocumentRetriever:
 
         return results
 
-    def retrieve_faculty_profile(self, name: str) -> list[RetrievalResult]:
+    def retrieve_faculty_profile(
+        self,
+        name: str,
+        top_k: int = 12,
+    ) -> list[RetrievalResult]:
         """Find one official faculty profile by name, including omitted middle names."""
         if not isinstance(name, str) or not name.strip() or self.bm25_retriever is None:
             return []
+        if top_k < 1:
+            raise ValueError("top_k must be at least 1.")
 
         name_tokens = re.findall(r"[a-z0-9]+", name.casefold())
         if len(name_tokens) < 2:
             return []
 
         records_by_url: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        records_by_person_section: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in self.bm25_retriever.records:
             metadata = record.get("metadata") or {}
             source_url = self._valid_http_url(metadata.get("source_url"))
@@ -376,27 +383,52 @@ class DocumentRetriever:
                 continue
 
             faculty_path = re.search(r"/faculty/([^/?#]+)", urlparse(source_url).path, re.I)
-            if faculty_path is None:
+            if faculty_path is not None:
+                profile_tokens = re.findall(r"[a-z0-9]+", faculty_path.group(1).casefold())
+                if self._ordered_tokens_match(name_tokens, profile_tokens):
+                    records_by_url[self._canonical_url(source_url)].append(record)
                 continue
 
-            profile_tokens = re.findall(r"[a-z0-9]+", faculty_path.group(1).casefold())
-            remaining_tokens = iter(profile_tokens)
-            matches_profile = all(
-                any(token == candidate for candidate in remaining_tokens) for token in name_tokens
-            )
-            if matches_profile:
-                records_by_url[self._canonical_url(source_url)].append(record)
+            section_title = str(metadata.get("section_title") or "").strip()
+            if not re.match(r"(?:Dr\.?|Prof(?:essor)?\.?)\s+", section_title, re.I):
+                continue
+            section_tokens = re.findall(r"[a-z0-9]+", section_title.casefold())
+            if self._ordered_tokens_match(name_tokens, section_tokens):
+                records_by_person_section[self._canonical_url(source_url)].append(record)
 
+        if not records_by_url:
+            current_sections = {
+                url: records
+                for url, records in records_by_person_section.items()
+                if not urlparse(url).path.casefold().endswith(".pdf")
+            }
+            records_by_url = current_sections or records_by_person_section
         if len(records_by_url) != 1:
             return []
 
-        records = next(iter(records_by_url.values()))
-        record = min(
-            records,
+        profile_records = next(iter(records_by_url.values()))
+        section_records = [
+            record
+            for record in profile_records
+            if str((record.get("metadata") or {}).get("section_title", "")).strip().casefold()
+            not in {"", "faculty"}
+        ]
+        records = sorted(
+            section_records or profile_records,
             key=lambda item: int((item.get("metadata") or {}).get("chunk_index", 0)),
         )
-        result, _ = self._build_result(record, distance=0.0)
-        return [result]
+        return [self._build_result(record, distance=0.0)[0] for record in records[:top_k]]
+
+    @staticmethod
+    def _ordered_tokens_match(name_tokens: list[str], evidence_tokens: list[str]) -> bool:
+        position = 0
+        for token in name_tokens:
+            while position < len(evidence_tokens) and evidence_tokens[position] != token:
+                position += 1
+            if position == len(evidence_tokens):
+                return False
+            position += 1
+        return True
 
     @classmethod
     def _priority_evidence_reason(cls, query: str, result: RetrievalResult) -> str | None:

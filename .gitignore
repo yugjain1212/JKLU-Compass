@@ -23,6 +23,7 @@ venv/
 
 # Generated datasets and local indexes
 data/raw/*
+!data/raw/jklu.edu.in_faculty_umesh-gupta.md
 data/processed/*
 data/chunks/*
 data/evaluation/*

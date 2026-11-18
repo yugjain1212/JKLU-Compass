@@ -101,11 +101,13 @@ BTECH_YEAR_SEMESTER_PATTERN = re.compile(
 TITLED_PERSON_NAME_PATTERN = re.compile(
     r"\b(?:(?i:assistant|associate|adjunct|visiting|asst\.?|assoc\.?)\s+)?"
     r"(?i:professor|prof\.?|dr\.?|dean|director)\s+(?:(?i:dr\.?|prof\.?)\s+)?"
-    r"(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,4})\b"
+    r"(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,4})\b",
+    re.IGNORECASE,
 )
 UNTITLED_PERSON_NAME_PATTERN = re.compile(
     r"\b(?:about|of|for|from|on|does|did|is|are|was|were|has|have)\s+"
-    r"(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,3})\b"
+    r"(?P<name>[A-Za-z][A-Za-z'’.-]+(?:\s+[A-Za-z][A-Za-z'’.-]+){1,3})\b",
+    re.IGNORECASE,
 )
 BARE_PERSON_NAME_PATTERN = re.compile(
     r"^\s*(?:(?:dr\.?|prof\.?|professor|assistant\s+professor|asst\.?\s+prof\.?)\s+)?"
@@ -113,7 +115,57 @@ BARE_PERSON_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NON_PERSON_NAME_TERMS = frozenset(
-    {"jklu", "university", "institute", "school", "engineering", "technology", "college"}
+    {
+        "a",
+        "about",
+        "an",
+        "are",
+        "assistant",
+        "can",
+        "could",
+        "college",
+        "current",
+        "dean",
+        "degree",
+        "degrees",
+        "details",
+        "dr",
+        "education",
+        "engineering",
+        "faculty",
+        "he",
+        "her",
+        "his",
+        "institute",
+        "is",
+        "it",
+        "its",
+        "jklu",
+        "of",
+        "professor",
+        "profile",
+        "prof",
+        "qualification",
+        "qualifications",
+        "school",
+        "she",
+        "tell",
+        "technology",
+        "the",
+        "their",
+        "them",
+        "they",
+        "this",
+        "that",
+        "university",
+        "vice",
+        "was",
+        "were",
+        "what",
+        "who",
+        "chancellor",
+        "you",
+    }
 )
 PERSON_EDUCATION_QUERY_PATTERN = re.compile(
     r"\b(?:education|educational|qualifications?|degrees?|alma\s+mater|studied|graduated)\b",
@@ -224,7 +276,7 @@ class RAGPipeline:
 
         name_lookup = self._bare_person_name_query(question)
         if name_lookup and isinstance(self.retriever, DocumentRetriever):
-            profile_results = self.retriever.retrieve_faculty_profile(name_lookup)
+            profile_results = self.retriever.retrieve_faculty_profile(name_lookup, top_k=1)
             _, profile_citations = self._build_context(profile_results)
             if profile_citations:
                 citation = profile_citations[0]
@@ -275,6 +327,13 @@ class RAGPipeline:
         requested_people = self._requested_person_names(question, history)
         if requested_people:
             context_results = self._scope_results_to_people(context_results, requested_people)
+            if len(requested_people) == 1 and isinstance(self.retriever, DocumentRetriever):
+                profile_results = self.retriever.retrieve_faculty_profile(
+                    requested_people[0],
+                    top_k=10,
+                )
+                if profile_results:
+                    context_results = profile_results
 
         structured_items = (
             StructuredExtractor.extract_btech_programmes(context_results)
@@ -312,6 +371,20 @@ class RAGPipeline:
                 answer=answer,
                 sources=education_citations,
                 retrieved_chunks=len(results),
+            )
+
+        person_section_answer = self._build_person_section_answer(
+            context_results,
+            citations,
+            requested_people,
+        )
+        if person_section_answer is not None:
+            answer, person_citations = person_section_answer
+            return RAGResponse(
+                question=question,
+                answer=answer,
+                sources=person_citations,
+                retrieved_chunks=len(context_results),
             )
 
         # Use deterministic rendering for verified B.Tech programme lists.
@@ -400,6 +473,17 @@ class RAGPipeline:
             sources=tuple(citations),
             retrieved_chunks=len(results),
             structured_data=structured_data,
+        )
+
+    def is_indexed_faculty_query(self, question: str) -> bool:
+        """Check whether a named faculty member has a matching indexed profile."""
+        if not isinstance(self.retriever, DocumentRetriever):
+            return False
+
+        people = self._requested_person_names(question, ())
+        return any(
+            self.retriever.retrieve_faculty_profile(name, top_k=1)
+            for name in people
         )
 
     def _answer_current_vc(self, question: str) -> RAGResponse:
@@ -1074,24 +1158,62 @@ ANSWER:
 
     @classmethod
     def _result_matches_person(cls, result: RetrievalResult, person: str) -> bool:
-        requested_name = cls._normalize_person_name(person)
+        requested_tokens = cls._normalize_person_name(person).split()
+        if len(requested_tokens) < 2:
+            return False
+
         faculty_slug = re.search(r"/faculty/([^/?#]+)", result.source_url or "", re.I)
         if faculty_slug:
-            return cls._normalize_person_name(faculty_slug.group(1).replace("-", " ")) == (
-                requested_name
+            evidence_tokens = cls._normalize_person_name(
+                faculty_slug.group(1).replace("-", " ")
+            ).split()
+            remaining_tokens = iter(evidence_tokens)
+            return all(
+                any(token == candidate for candidate in remaining_tokens)
+                for token in requested_tokens
             )
 
-        evidence = " ".join(
-            str(value)
-            for value in (
-                result.content,
-                result.title,
-                result.metadata.get("section_title", ""),
-                result.metadata.get("heading_path", ""),
+        section_title = str(result.metadata.get("section_title", ""))
+        section_person = TITLED_PERSON_NAME_PATTERN.search(section_title)
+        if section_person:
+            section_tokens = cls._normalize_person_name(section_person.group("name")).split()
+            remaining_tokens = iter(section_tokens)
+            return all(
+                any(token == candidate for candidate in remaining_tokens)
+                for token in requested_tokens
             )
-            if value
-        )
-        return requested_name in cls._normalize_person_name(evidence)
+
+        for segment in re.split(r"\n+|(?<=[.!?])\s+(?=[A-Z])", result.content):
+            evidence_tokens = cls._normalize_person_name(segment).split()
+            if cls._name_precedes_claim(requested_tokens, evidence_tokens):
+                return True
+        return False
+
+    @staticmethod
+    def _name_precedes_claim(name_tokens: Sequence[str], evidence_tokens: Sequence[str]) -> bool:
+        """Require a named person to appear before other facts in the same sentence or row."""
+        position = 0
+        for token in name_tokens:
+            while position < len(evidence_tokens) and evidence_tokens[position] != token:
+                position += 1
+            if position == len(evidence_tokens):
+                return False
+            position += 1
+        return position < len(evidence_tokens)
+
+    @staticmethod
+    def _ordered_name_tokens_match(
+        name_tokens: Sequence[str],
+        evidence_tokens: Sequence[str],
+    ) -> bool:
+        position = 0
+        for token in name_tokens:
+            while position < len(evidence_tokens) and evidence_tokens[position] != token:
+                position += 1
+            if position == len(evidence_tokens):
+                return False
+            position += 1
+        return True
 
     @classmethod
     def _build_person_education_answer(
@@ -1159,6 +1281,60 @@ ANSWER:
                 used_citations.append(citation)
 
         return "The matching indexed source states:\n" + "\n".join(lines), tuple(used_citations)
+
+    @classmethod
+    def _build_person_section_answer(
+        cls,
+        results: list[RetrievalResult],
+        citations: list[SourceCitation],
+        people: Sequence[str],
+    ) -> tuple[str, tuple[SourceCitation, ...]] | None:
+        """Use an exact person heading when no dedicated faculty URL is indexed."""
+        if len(people) != 1:
+            return None
+
+        citation_by_chunk = {citation.chunk_id: citation for citation in citations}
+        for result in results:
+            if "/faculty/" in urlparse(result.source_url or "").path.casefold():
+                continue
+
+            section_person = TITLED_PERSON_NAME_PATTERN.search(
+                str(result.metadata.get("section_title", ""))
+            )
+            section_title = str(result.metadata.get("section_title", "")).strip()
+            citation = citation_by_chunk.get(result.id)
+            if (
+                section_person is None
+                or citation is None
+                or not cls._result_matches_person(result, people[0])
+            ):
+                continue
+
+            lines = result.content.splitlines()
+            for index, line in enumerate(lines):
+                if not cls._ordered_name_tokens_match(
+                    cls._normalize_person_name(people[0]).split(),
+                    cls._normalize_person_name(line).split(),
+                ):
+                    continue
+
+                role = next(
+                    (
+                        re.sub(r"[*_`]+", "", following).strip()
+                        for following in lines[index + 1 :]
+                        if following.strip() and not following.lstrip().startswith(("#", "!["))
+                    ),
+                    "",
+                )
+                if not role:
+                    continue
+                return (
+                    f"The indexed JKLU page lists {section_title} as "
+                    f"{role} [Source {citation.number}].",
+                    (citation,),
+                )
+
+        return None
 
     @classmethod
     def _filter_content_to_degree(cls, content: str, target_degree: str) -> str | None:
