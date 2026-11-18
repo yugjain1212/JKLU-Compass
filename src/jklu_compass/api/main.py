@@ -195,7 +195,6 @@ def create_app(
             question = QueryReconstructor.reconstruct(
                 pending.question,
                 selected.question,
-                pending.history,
             )
             display_question = f"{pending.question} ({selected.question})"
             result = pipeline.ask(question, history=pending.history)

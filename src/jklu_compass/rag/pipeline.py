@@ -6,6 +6,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from html import unescape
+from urllib.parse import urlparse
 
 import httpx
 
@@ -72,6 +73,13 @@ INDEXED_VC_URLS = frozenset(
         LIVE_VC_URL,
         "https://jklu.edu.in/about-us/leadership-insights/vc-message",
     }
+)
+IET_SOURCE_URL = "https://jklu.edu.in/institute/engineering-technology"
+IET_DEAN_EVIDENCE_PATTERN = re.compile(
+    r"(?m)^\s*#{1,6}\s*(?P<name>(?:Dr\.?|Prof\.?)\s+"
+    r"[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,4})\s*\n+"
+    r"\s*Dean\s*\n+\s*Engineering\s*(?:&|and)\s*Technology\b",
+    re.IGNORECASE,
 )
 QUESTION_PART_SEPARATOR = re.compile(
     r"\s+(?:and\s+(?:also\s+)?|also\s+)"
@@ -230,6 +238,9 @@ class RAGPipeline:
                     sources=(citation,),
                     retrieved_chunks=len(profile_results),
                 )
+
+        if self._is_iet_dean_query(question):
+            return self._answer_iet_dean(question)
 
         if CURRENT_VC_QUERY.search(question):
             return self._answer_current_vc(question)
@@ -442,6 +453,59 @@ class RAGPipeline:
             answer=answer,
             sources=(citation,),
             retrieved_chunks=retrieved_chunks,
+        )
+
+    def _answer_iet_dean(self, question: str) -> RAGResponse:
+        """Answer IET dean questions only from the IET's own leadership block."""
+        try:
+            results = self.retriever.retrieve(
+                "Dr. Tapas Kumar Dean Engineering & Technology IET",
+                top_k=max(self.top_k, 12),
+            )
+        except (OSError, RuntimeError, ValueError):
+            results = []
+
+        iet_path = urlparse(IET_SOURCE_URL).path
+        for result in results:
+            if not result.source_url or urlparse(result.source_url).path.rstrip("/") != iet_path:
+                continue
+            match = IET_DEAN_EVIDENCE_PATTERN.search(result.content)
+            if match is None:
+                continue
+
+            _, citations = self._build_context([result])
+            if not citations:
+                continue
+            citation = citations[0]
+            return RAGResponse(
+                question=question,
+                answer=(
+                    f"The IET page lists {match.group('name')} as Dean of Engineering & "
+                    f"Technology [Source 1]."
+                ),
+                sources=(citation,),
+                retrieved_chunks=1,
+            )
+
+        return RAGResponse(
+            question=question,
+            answer=(
+                "I couldn't confirm the IET dean from the indexed IET leadership page. "
+                "Please check the official page for the current listing."
+            ),
+            sources=(),
+            retrieved_chunks=0,
+        )
+
+    @staticmethod
+    def _is_iet_dean_query(question: str) -> bool:
+        return bool(
+            re.search(r"\bdean\b", question, re.IGNORECASE)
+            and re.search(
+                r"\b(?:iet|institute\s+of\s+engineering(?:\s+and|\s*&)?\s+technology)\b",
+                question,
+                re.IGNORECASE,
+            )
         )
 
     def _indexed_current_vc(self) -> tuple[str | None, SourceCitation]:
@@ -969,11 +1033,12 @@ ANSWER:
         """Find explicitly named people in the question or its user-history subject."""
         names = []
         texts = [question]
-        texts.extend(
-            content
-            for role, content in cls._subject_history(history)
-            if role == "user"
-        )
+        if cls._is_follow_up_question(question):
+            texts.extend(
+                content
+                for role, content in cls._subject_history(history)
+                if role == "user"
+            )
 
         for text in texts:
             matches = [

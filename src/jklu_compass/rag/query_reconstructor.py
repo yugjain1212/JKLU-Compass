@@ -15,8 +15,7 @@ class QueryReconstructor:
         history: Sequence[tuple[str, str]] = (),
     ) -> str:
         query = (
-            f"{original_question.strip()} "
-            f"(Clarification: {selected_option.strip()})"
+            f"{original_question.strip()} {selected_option.strip()}"
         )
         relevant_history = [
             (role, content.strip()[:500])
