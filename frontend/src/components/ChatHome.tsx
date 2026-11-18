@@ -8,12 +8,22 @@ interface SourceCitation {
   chunk_id: string;
 }
 
+interface ClarificationOption {
+  id: string;
+  question: string;
+}
+
 interface Message {
   id: number;
   role: "user" | "assistant";
   text: string;
   ts: Date;
   sources?: SourceCitation[];
+  options?: ClarificationOption[];
+  clarificationId?: string;
+  selectedOptionId?: string;
+  otherOpen?: boolean;
+  otherText?: string;
   error?: boolean;
 }
 
@@ -32,6 +42,16 @@ function isSourceCitation(value: unknown): value is SourceCitation {
     (value.url === null || typeof value.url === "string") &&
     typeof value.chunk_id === "string"
   );
+}
+
+function isClarificationOption(value: unknown): value is ClarificationOption {
+  return isRecord(value) && typeof value.id === "string" && typeof value.question === "string";
+}
+
+function createConversationId(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `conversation-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function safeSourceUrl(value: string | null): string | null {
@@ -108,12 +128,14 @@ export function ChatHome() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
+  const [clarificationMode, setClarificationMode] = useState<"adaptive" | "always">("adaptive");
   const [historyOpen, setHistoryOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const shouldFollowRef = useRef(true);
   const autoScrollRef = useRef(false);
   const sendingRef = useRef(false);
+  const conversationIdRef = useRef<string>(createConversationId());
 
   useLayoutEffect(() => {
     const container = chatScrollRef.current;
@@ -159,7 +181,12 @@ export function ChatHome() {
     if (view === "home") setView("chat");
 
     const userMsg: Message = { id: uid(), role: "user", text, ts: new Date() };
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages((prev) => [
+      ...prev.map((message) => message.options && !message.selectedOptionId
+        ? { ...message, selectedOptionId: "superseded" }
+        : message),
+      userMsg,
+    ]);
     setTyping(true);
 
     try {
@@ -168,6 +195,8 @@ export function ChatHome() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: text,
+          conversation_id: conversationIdRef.current,
+          clarification_mode: clarificationMode,
           history: messages
             .filter((message) => !message.error)
             .slice(-8)
@@ -183,18 +212,110 @@ export function ChatHome() {
         throw new Error(detail);
       }
 
-      if (!isRecord(payload) || typeof payload.answer !== "string") {
+      if (!isRecord(payload) || typeof payload.status !== "string") {
         throw new Error("JKLU Compass returned an invalid response. Please try again.");
       }
 
-      const answer = payload.answer;
+      if (typeof payload.conversation_id === "string") {
+        conversationIdRef.current = payload.conversation_id;
+      }
+      if (payload.status === "clarification_required") {
+        const options = Array.isArray(payload.options)
+          ? payload.options.filter(isClarificationOption)
+          : [];
+        if (
+          typeof payload.clarification_id !== "string" ||
+          typeof payload.clarification_message !== "string" ||
+          options.length < 2
+        ) {
+          throw new Error("JKLU Compass returned an invalid clarification. Please try again.");
+        }
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid(),
+            role: "assistant",
+            text: payload.clarification_message as string,
+            ts: new Date(),
+            options,
+            clarificationId: payload.clarification_id as string,
+          },
+        ]);
+      } else if (payload.status === "answer" && typeof payload.answer === "string") {
+        const sources = Array.isArray(payload.sources)
+          ? payload.sources.filter(isSourceCitation)
+          : [];
+        setMessages((prev) => [
+          ...prev,
+          { id: uid(), role: "assistant", text: payload.answer as string, ts: new Date(), sources },
+        ]);
+      } else {
+        throw new Error("JKLU Compass returned an invalid response. Please try again.");
+      }
+    } catch (error) {
+      const errorText = error instanceof TypeError
+        ? "Couldn't connect to JKLU Compass. Start the backend and confirm Ollama is running, then try again."
+        : error instanceof Error
+          ? error.message
+          : "Something went wrong while contacting JKLU Compass.";
+      setMessages((prev) => [
+        ...prev,
+        { id: uid(), role: "assistant", text: errorText, ts: new Date(), error: true },
+      ]);
+    } finally {
+      sendingRef.current = false;
+      setTyping(false);
+    }
+  }
+
+  async function selectOption(
+    messageId: number,
+    option: ClarificationOption,
+    custom = false,
+  ) {
+    if (sendingRef.current) return;
+    const clarification = messages.find((message) => message.id === messageId);
+    if (!clarification?.clarificationId || clarification.selectedOptionId) return;
+    const selectedText = custom ? clarification.otherText?.trim() : option.question;
+    if (!selectedText) return;
+
+    sendingRef.current = true;
+    shouldFollowRef.current = true;
+    setMessages((prev) => [
+      ...prev.map((message) => message.id === messageId
+          ? { ...message, selectedOptionId: custom ? "other" : option.id }
+        : message),
+      { id: uid(), role: "user", text: selectedText, ts: new Date() },
+    ]);
+    setTyping(true);
+
+    try {
+      const response = await fetch("/api/v1/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: conversationIdRef.current,
+          clarification_id: clarification.clarificationId,
+          option_id: custom ? "other" : option.id,
+          ...(custom ? { custom_answer: selectedText } : {}),
+        }),
+      });
+      const payload: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = isRecord(payload) && typeof payload.detail === "string"
+          ? payload.detail
+          : `JKLU Compass returned an error (${response.status}).`;
+        throw new Error(detail);
+      }
+      if (!isRecord(payload) || payload.status !== "answer" || typeof payload.answer !== "string") {
+        throw new Error("JKLU Compass returned an invalid response. Please try again.");
+      }
       const sources = Array.isArray(payload.sources)
         ? payload.sources.filter(isSourceCitation)
         : [];
-
       setMessages((prev) => [
         ...prev,
-        { id: uid(), role: "assistant", text: answer, ts: new Date(), sources },
+        { id: uid(), role: "assistant", text: payload.answer as string, ts: new Date(), sources },
       ]);
     } catch (error) {
       const errorText = error instanceof TypeError
@@ -288,6 +409,64 @@ export function ChatHome() {
                   <p className={`msg__text${m.error ? " msg__text--error" : ""}`}>
                     {renderMessageText(m.text, m.sources)}
                   </p>
+                  {m.options && (
+                    <>
+                      <div className="clarification-options" role="group" aria-label="Clarification options">
+                        {m.options.map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            className={`clarification-option${m.selectedOptionId === option.id ? " clarification-option--selected" : ""}`}
+                            disabled={typing || Boolean(m.selectedOptionId)}
+                            onClick={() => void selectOption(m.id, option)}
+                          >
+                            <span>{option.question}</span>
+                            <span className="clarification-option__arrow" aria-hidden="true">↗</span>
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          className={`clarification-option${m.selectedOptionId === "other" ? " clarification-option--selected" : ""}`}
+                          disabled={typing || Boolean(m.selectedOptionId)}
+                          aria-expanded={Boolean(m.otherOpen)}
+                          onClick={() => setMessages((prev) => prev.map((message) =>
+                            message.id === m.id ? { ...message, otherOpen: !message.otherOpen } : message,
+                          ))}
+                        >
+                          <span>Other — I’ll write my own</span>
+                          <span className="clarification-option__arrow" aria-hidden="true">↗</span>
+                        </button>
+                      </div>
+                      {m.otherOpen && !m.selectedOptionId && (
+                        <div className="clarification-other">
+                          <label className="clarification-other__label" htmlFor={`clarification-other-${m.id}`}>
+                            Tell me what you meant
+                          </label>
+                          <textarea
+                            id={`clarification-other-${m.id}`}
+                            value={m.otherText ?? ""}
+                            maxLength={500}
+                            rows={2}
+                            placeholder="Add the detail or focus you want..."
+                            disabled={typing}
+                            onChange={(event) => setMessages((prev) => prev.map((message) =>
+                              message.id === m.id ? { ...message, otherText: event.target.value } : message,
+                            ))}
+                          />
+                          <div className="clarification-other__actions">
+                            <span>{(m.otherText ?? "").length}/500</span>
+                            <button
+                              type="button"
+                              disabled={typing || !m.otherText?.trim()}
+                              onClick={() => void selectOption(m.id, { id: "other", question: "" }, true)}
+                            >
+                              Use this
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
                   {m.sources && m.sources.length > 0 && (
                     <div className="msg__sources" role="group" aria-label="Sources">
                       {m.sources.map((source) => {
@@ -350,6 +529,16 @@ export function ChatHome() {
           />
           <div className="input-box__toolbar">
             <div className="input-box__toolbar-left">
+              <button
+                className="clarification-mode"
+                type="button"
+                aria-label={`Clarification mode: ${clarificationMode}`}
+                aria-pressed={clarificationMode === "always"}
+                onClick={() => setClarificationMode((mode) => mode === "adaptive" ? "always" : "adaptive")}
+                disabled={typing}
+              >
+                Clarify: {clarificationMode}
+              </button>
               <button className="icon-btn" aria-label="Attach">
                 <PlusIcon />
               </button>

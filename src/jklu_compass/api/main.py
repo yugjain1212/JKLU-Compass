@@ -5,12 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 import chromadb
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from jklu_compass.api.clarification_state import ClarificationState
 from jklu_compass.api.schemas import (
+    ClarificationOptionResponse,
     HealthResponse,
     QueryRequest,
     QueryResponse,
@@ -21,6 +24,8 @@ from jklu_compass.api.schemas import (
 from jklu_compass.embeddings.encoder import EmbeddingEncoder
 from jklu_compass.generation.local_llm import LocalLLM, LocalLLMError
 from jklu_compass.rag.pipeline import RAGPipeline
+from jklu_compass.rag.query_clarifier import QueryClarifier
+from jklu_compass.rag.query_reconstructor import QueryReconstructor
 from jklu_compass.retrieval.retriever import DocumentRetriever
 from jklu_compass.vectorstore.chroma_store import (
     DEFAULT_COLLECTION_NAME,
@@ -80,6 +85,7 @@ def build_rag_pipeline() -> RAGPipeline:
 
 def create_app(
     pipeline_factory: Callable[[], RAGPipeline] = build_rag_pipeline,
+    clarification_ttl_seconds: int = 600,
 ) -> FastAPI:
     """Create the FastAPI application."""
 
@@ -87,8 +93,11 @@ def create_app(
     async def lifespan(app: FastAPI) -> Iterator[None]:
         """Initialize the RAG pipeline once during application startup."""
         app.state.rag_pipeline = pipeline_factory()
+        llm = getattr(app.state.rag_pipeline, "llm", None)
+        app.state.query_clarifier = QueryClarifier(llm) if llm is not None else None
         yield
         app.state.rag_pipeline = None
+        app.state.query_clarifier = None
 
     app = FastAPI(
         title="JKLU Compass API",
@@ -98,6 +107,7 @@ def create_app(
         version="1.0.0",
         lifespan=lifespan,
     )
+    app.state.clarification_state = ClarificationState(clarification_ttl_seconds)
 
     @app.exception_handler(LocalLLMError)
     async def handle_llm_error(
@@ -147,15 +157,79 @@ def create_app(
         payload: QueryRequest,
         request: Request,
     ) -> QueryResponse:
-        """Answer a question using the existing RAG pipeline."""
+        """Clarify when useful, then answer through the existing RAG pipeline."""
         pipeline: RAGPipeline = request.app.state.rag_pipeline
+        conversation_id = payload.conversation_id or str(uuid4())
+        state: ClarificationState = request.app.state.clarification_state
+        display_question = payload.question or ""
 
-        history = [(turn.role, turn.content) for turn in payload.history]
-        result = (
-            pipeline.ask(payload.question, history=history)
-            if history
-            else pipeline.ask(payload.question)
-        )
+        if payload.clarification_id:
+            try:
+                pending, selected = state.consume(
+                    conversation_id,
+                    payload.clarification_id,
+                    payload.option_id or "",
+                    payload.custom_answer,
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Invalid clarification option.",
+                ) from exc
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=410,
+                    detail="This clarification expired. Please ask your question again.",
+                ) from exc
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This clarification was already submitted.",
+                ) from exc
+            except LookupError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This clarification is stale. Please ask your question again.",
+                ) from exc
+
+            question = QueryReconstructor.reconstruct(
+                pending.question,
+                selected.question,
+                pending.history,
+            )
+            display_question = f"{pending.question} ({selected.question})"
+            result = pipeline.ask(question, history=pending.history)
+        else:
+            question = payload.question or ""
+            history = tuple((turn.role, turn.content) for turn in payload.history)
+            clarifier: QueryClarifier | None = request.app.state.query_clarifier
+            decision = (
+                clarifier.clarify(question, history, payload.clarification_mode)
+                if clarifier is not None
+                else None
+            )
+            if decision is not None and decision.required:
+                clarification_id = str(uuid4())
+                pending = state.create(
+                    conversation_id,
+                    clarification_id,
+                    question,
+                    history,
+                    decision.options,
+                )
+                return QueryResponse(
+                    status="clarification_required",
+                    question=question,
+                    conversation_id=conversation_id,
+                    clarification_id=pending.clarification_id,
+                    clarification_message=decision.message,
+                    options=[
+                        ClarificationOptionResponse(id=option.id, question=option.question)
+                        for option in decision.options
+                    ],
+                )
+
+            result = pipeline.ask(question, history=history)
 
         structured_data = None
 
@@ -172,7 +246,8 @@ def create_app(
             )
 
         return QueryResponse(
-            question=result.question,
+            status="answer",
+            question=display_question,
             answer=result.answer,
             sources=[
                 SourceResponse(
@@ -185,6 +260,7 @@ def create_app(
             ],
             retrieved_chunks=result.retrieved_chunks,
             structured_data=structured_data,
+            conversation_id=conversation_id,
         )
 
     return app

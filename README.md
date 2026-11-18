@@ -131,7 +131,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/query \
   -d '{"question":"What B.Tech specialisations are available at JKLU?"}'
 ```
 
-The request accepts a `question` string from 1 to 2,000 characters. The response contains:
+The request accepts a `question` string from 1 to 2,000 characters and an optional
+`clarification_mode` of `adaptive` (default) or `always`. Adaptive mode proceeds directly
+when clarification is unlikely to improve the answer. Always mode presents refinements for
+every question. Responses have a `status` of `answer` or `clarification_required`.
+
+An answer response contains:
 
 - `answer`: answer text, with `[Source N]` labels when the generator includes inline citations.
 - `sources`: source number, title, URL (when available), and chunk ID.
@@ -142,6 +147,27 @@ For follow-up questions in a chat, the request may also include up to eight rece
 messages as `history` entries with `role` (`user` or `assistant`) and `content` fields.
 The service uses this history only to resolve references such as "their" or "that";
 university facts still need support from the indexed documents.
+
+When clarification is needed, the response includes `conversation_id`, `clarification_id`,
+`clarification_message`, and 2–4 selectable `options` (`id` and `question`). Submit a selected
+option to the same endpoint; retrieval begins only after the server validates it:
+
+```json
+{
+  "conversation_id": "conversation-id-from-response",
+  "clarification_id": "pending-id-from-response",
+  "option_id": "option-1"
+}
+```
+
+To provide your own clarification, submit `option_id: "other"` with a `custom_answer` string
+of up to 500 characters. The custom text is treated as the user's intent and is still grounded
+against retrieved JKLU sources.
+
+Selections are single-use and expire after ten minutes. Invalid option IDs return HTTP 422;
+stale or duplicate selections return HTTP 409, and expired selections return HTTP 410. Pending
+clarifications are stored in the API process, so a multi-worker deployment should use shared
+state before running multiple API workers.
 
 ```json
 {

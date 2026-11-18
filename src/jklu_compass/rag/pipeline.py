@@ -90,6 +90,45 @@ BTECH_YEAR_SEMESTER_PATTERN = re.compile(
     r"(?P<semester>[1-8])(?:st|nd|rd|th)?\s+sem(?:ester)?\b",
     re.IGNORECASE,
 )
+TITLED_PERSON_NAME_PATTERN = re.compile(
+    r"\b(?:(?i:assistant|associate|adjunct|visiting|asst\.?|assoc\.?)\s+)?"
+    r"(?i:professor|prof\.?|dr\.?|dean|director)\s+(?:(?i:dr\.?|prof\.?)\s+)?"
+    r"(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,4})\b"
+)
+UNTITLED_PERSON_NAME_PATTERN = re.compile(
+    r"\b(?:about|of|for|from|on|does|did|is|are|was|were|has|have)\s+"
+    r"(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,3})\b"
+)
+BARE_PERSON_NAME_PATTERN = re.compile(
+    r"^\s*(?:(?:dr\.?|prof\.?|professor|assistant\s+professor|asst\.?\s+prof\.?)\s+)?"
+    r"(?P<name>[a-z][a-z'’.-]+(?:\s+[a-z][a-z'’.-]+){1,3})[?.!]*\s*$",
+    re.IGNORECASE,
+)
+NON_PERSON_NAME_TERMS = frozenset(
+    {"jklu", "university", "institute", "school", "engineering", "technology", "college"}
+)
+PERSON_EDUCATION_QUERY_PATTERN = re.compile(
+    r"\b(?:education|educational|qualifications?|degrees?|alma\s+mater|studied|graduated)\b",
+    re.IGNORECASE,
+)
+PERSON_EDUCATION_EVIDENCE_PATTERN = re.compile(
+    r"\b(?:education|academic\s+qualifications?|degrees?)\s*[:\-]\s*\S"
+    r"|\b(?:holds?|earned|received|completed|graduated|studied)\b.{0,140}"
+    r"\b(?:bachelor|b\.?\s*tech|b\.?\s*des|master|m\.?\s*tech|m\.?\s*des|"
+    r"ph\.?\s*d|doctorate|degree|diploma)\b"
+    r"|\b(?:bachelor|b\.?\s*tech|b\.?\s*des|master|m\.?\s*tech|m\.?\s*des|"
+    r"ph\.?\s*d|doctorate|diploma)\b.{0,100}\b(?:from|in|at)\b",
+    re.IGNORECASE,
+)
+PERSON_EDUCATION_SECTION_PATTERN = re.compile(
+    r"^(?:education(?:al\s+background)?|academic\s+qualifications?|qualifications?|degrees?)$",
+    re.IGNORECASE,
+)
+PERSON_CREDENTIAL_PATTERN = re.compile(
+    r"\b(?:bachelor|b\.?\s*tech|b\.?\s*des|master|m\.?\s*tech|m\.?\s*des|"
+    r"ph\.?\s*d|doctorate|diploma)\b",
+    re.IGNORECASE,
+)
 DEGREE_LABELS = {
     "btech": "B.Tech",
     "bdes": "B.Des",
@@ -175,6 +214,23 @@ class RAGPipeline:
                 retrieved_chunks=0,
             )
 
+        name_lookup = self._bare_person_name_query(question)
+        if name_lookup and isinstance(self.retriever, DocumentRetriever):
+            profile_results = self.retriever.retrieve_faculty_profile(name_lookup)
+            _, profile_citations = self._build_context(profile_results)
+            if profile_citations:
+                citation = profile_citations[0]
+                profile_name = citation.title.split(",", maxsplit=1)[0]
+                return RAGResponse(
+                    question=question,
+                    answer=(
+                        f"I found the JKLU faculty profile for {profile_name} "
+                        f"[Source {citation.number}]. What would you like to know?"
+                    ),
+                    sources=(citation,),
+                    retrieved_chunks=len(profile_results),
+                )
+
         if CURRENT_VC_QUERY.search(question):
             return self._answer_current_vc(question)
 
@@ -190,16 +246,24 @@ class RAGPipeline:
             )
 
         retrieval_queries = self._build_retrieval_queries(question, history)
+        retrieval_limit = (
+            max(self.top_k, 6)
+            if DocumentRetriever.is_btech_programme_list_query(question)
+            else self.top_k
+        )
         results_by_query = [
-            self.retriever.retrieve(retrieval_query, top_k=self.top_k)
+            self.retriever.retrieve(retrieval_query, top_k=retrieval_limit)
             for retrieval_query in retrieval_queries
         ]
-        results = self._merge_retrieval_results(results_by_query, self.top_k)
+        results = self._merge_retrieval_results(results_by_query, retrieval_limit)
         context_results = (
             results
             if len(retrieval_queries) > 1
             else self._scope_results_to_question(question, results)
         )
+        requested_people = self._requested_person_names(question, history)
+        if requested_people:
+            context_results = self._scope_results_to_people(context_results, requested_people)
 
         structured_items = (
             StructuredExtractor.extract_btech_programmes(context_results)
@@ -223,6 +287,22 @@ class RAGPipeline:
                 sources=(),
                 retrieved_chunks=len(results),
             )
+
+        person_education_answer = self._build_person_education_answer(
+            question,
+            context_results,
+            citations,
+            requested_people,
+        )
+        if person_education_answer is not None:
+            answer, education_citations = person_education_answer
+            return RAGResponse(
+                question=question,
+                answer=answer,
+                sources=education_citations,
+                retrieved_chunks=len(results),
+            )
+
         # Use deterministic rendering for verified B.Tech programme lists.
         structured_data = self._build_structured_answer(
             structured_items,
@@ -437,6 +517,12 @@ class RAGPipeline:
         )
 
     @staticmethod
+    def _bare_person_name_query(question: str) -> str | None:
+        """Return a short name-only query for exact indexed faculty lookup."""
+        match = BARE_PERSON_NAME_PATTERN.fullmatch(question)
+        return match.group("name") if match else None
+
+    @staticmethod
     def _subject_history(
         history: Sequence[tuple[str, str]],
     ) -> tuple[tuple[str, str], ...]:
@@ -534,7 +620,7 @@ class RAGPipeline:
     @staticmethod
     def _split_question_parts(question: str) -> list[str]:
         """Split explicit additional requests without splitting names or course titles."""
-        parts = [part.strip(" ,;?") for part in QUESTION_PART_SEPARATOR.split(question)]
+        parts = [part.strip(" ,;") for part in QUESTION_PART_SEPARATOR.split(question)]
         return [part for part in parts if part]
 
     @classmethod
@@ -548,6 +634,22 @@ class RAGPipeline:
         for part in cls._split_question_parts(question):
             query = cls._build_retrieval_query(part, history)
             expansions = []
+
+            # Leadership tables often contain many unrelated "Dean" entries.
+            # Search the IET's own faculty section explicitly so that a dean of
+            # another institute (or a university-wide role) cannot dominate.
+            asks_iet_dean = bool(
+                re.search(r"\b(?:dean|director)\b", part, re.I)
+                and re.search(
+                    r"\b(?:iet|institute\s+of\s+engineering(?:\s+and|\s*&)?\s+technology)\b",
+                    part,
+                    re.I,
+                )
+            )
+            if asks_iet_dean:
+                queries.append(
+                    "JKLU Institute of Engineering & Technology IET faculty Dr. Tapas Kumar Dean"
+                )
 
             if CLASS_TIMING_PATTERN.search(part):
                 expansions.append(
@@ -859,6 +961,141 @@ ANSWER:
         return focused_results or target_results or results
 
     @classmethod
+    def _requested_person_names(
+        cls,
+        question: str,
+        history: Sequence[tuple[str, str]],
+    ) -> tuple[str, ...]:
+        """Find explicitly named people in the question or its user-history subject."""
+        names = []
+        texts = [question]
+        texts.extend(
+            content
+            for role, content in cls._subject_history(history)
+            if role == "user"
+        )
+
+        for text in texts:
+            matches = [
+                match.group("name")
+                for pattern in (TITLED_PERSON_NAME_PATTERN, UNTITLED_PERSON_NAME_PATTERN)
+                for match in pattern.finditer(text)
+            ]
+            for name in matches:
+                normalized = cls._normalize_person_name(name)
+                if not normalized or NON_PERSON_NAME_TERMS.intersection(normalized.split()):
+                    continue
+                if normalized not in {cls._normalize_person_name(item) for item in names}:
+                    names.append(name)
+
+        return tuple(names)
+
+    @classmethod
+    def _scope_results_to_people(
+        cls,
+        results: list[RetrievalResult],
+        people: Sequence[str],
+    ) -> list[RetrievalResult]:
+        """Keep evidence tied to a person named by the user."""
+        return [
+            result
+            for result in results
+            if any(cls._result_matches_person(result, person) for person in people)
+        ]
+
+    @staticmethod
+    def _normalize_person_name(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip()
+
+    @classmethod
+    def _result_matches_person(cls, result: RetrievalResult, person: str) -> bool:
+        requested_name = cls._normalize_person_name(person)
+        faculty_slug = re.search(r"/faculty/([^/?#]+)", result.source_url or "", re.I)
+        if faculty_slug:
+            return cls._normalize_person_name(faculty_slug.group(1).replace("-", " ")) == (
+                requested_name
+            )
+
+        evidence = " ".join(
+            str(value)
+            for value in (
+                result.content,
+                result.title,
+                result.metadata.get("section_title", ""),
+                result.metadata.get("heading_path", ""),
+            )
+            if value
+        )
+        return requested_name in cls._normalize_person_name(evidence)
+
+    @classmethod
+    def _build_person_education_answer(
+        cls,
+        question: str,
+        results: list[RetrievalResult],
+        citations: list[SourceCitation],
+        people: Sequence[str],
+    ) -> tuple[str, tuple[SourceCitation, ...]] | None:
+        """Answer named-person education questions only with explicit profile evidence."""
+        if not people or not PERSON_EDUCATION_QUERY_PATTERN.search(question):
+            return None
+
+        citation_by_chunk = {citation.chunk_id: citation for citation in citations}
+        evidence = []
+        for result in results:
+            citation = citation_by_chunk.get(result.id)
+            if citation is None:
+                continue
+            person = next(
+                (name for name in people if cls._result_matches_person(result, name)),
+                people[0],
+            )
+            segments = re.split(r"\n+|(?<=[.!?])\s+(?=[A-Z])", result.content.strip())
+            for index, segment in enumerate(segments):
+                detail = segment.strip(" -*#\t")
+                if detail and PERSON_EDUCATION_EVIDENCE_PATTERN.search(detail):
+                    evidence.append((person, detail, citation))
+                elif (
+                    index > 0
+                    and PERSON_EDUCATION_SECTION_PATTERN.fullmatch(
+                        segments[index - 1].strip(" -*#\t")
+                    )
+                    and PERSON_CREDENTIAL_PATTERN.search(detail)
+                ):
+                    evidence.append((person, detail, citation))
+
+        if not evidence:
+            citation = next(
+                (
+                    citation_by_chunk[result.id]
+                    for result in results
+                    if result.id in citation_by_chunk
+                ),
+                None,
+            )
+            if citation is None:
+                return None
+            return (
+                f"I couldn't confirm {people[0]}'s educational qualifications from the "
+                f"matching indexed source [Source {citation.number}].",
+                (citation,),
+            )
+
+        lines = []
+        used_citations = []
+        seen = set()
+        for person, detail, citation in evidence:
+            key = (person, detail.casefold(), citation.chunk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- {person}: {detail} [Source {citation.number}]")
+            if citation not in used_citations:
+                used_citations.append(citation)
+
+        return "The matching indexed source states:\n" + "\n".join(lines), tuple(used_citations)
+
+    @classmethod
     def _filter_content_to_degree(cls, content: str, target_degree: str) -> str | None:
         """Keep shared context and lines that mention only the target degree."""
         filtered_lines = []
@@ -1119,6 +1356,18 @@ ANSWER:
                 "hours are stated in the passages, say they are not available in the "
                 "indexed sources."
             )
+        if re.search(r"\b(?:dean|director)\b", question, re.I) and re.search(
+            r"\b(?:iet|institute\s+of\s+engineering(?:\s+and|\s*&)?\s+technology)\b",
+            question,
+            re.I,
+        ):
+            guidance.append(
+                "For the IET dean, prioritize the official Institute of Engineering & "
+                "Technology faculty listing. Do not confuse it with deans or directors "
+                "of other JKLU institutes or university-wide roles. Give the person's "
+                "name and role first; add background only when the supplied passages "
+                "directly support it."
+            )
         question_guidance = "\n".join(f"- {item}" for item in guidance)
 
         return f"""You are JKLU Compass, an AI assistant for
@@ -1131,19 +1380,23 @@ information from retrieved documents.
 
 GROUNDING AND CITATIONS:
 
-- Use the recent chat only to resolve references such as "he", "their", or "that".
-  The chat is not factual evidence and must not be cited. Use the reference passages
-  below for every JKLU fact.
-- Answer only what the current question asks. Never invent facts, fill gaps with
-  outside knowledge, or add unrelated programmes, fees, scholarships, or caveats.
+- Use the reference passages as evidence for every JKLU fact. Use the recent chat only
+  to resolve references such as "he", "their", or "that"; chat is not factual evidence.
+- Answer only what the current question asks. Never invent university facts or fill
+  gaps with outside knowledge, or add unrelated programmes, fees, scholarships, or caveats.
 - Missing evidence means "not confirmed in the indexed sources"; it does not prove
   that a programme, semester, subject, or timetable does not exist. Make a negative
   claim only when a reference passage explicitly supports it.
-- Cite each factual claim with the exact supplied label, such as [Source 1]. Do not
-  invent source labels or URLs.
+- Do not invent citations or URLs. Cite factual claims with exact labels, such as [Source 1].
 - If the passages do not support the requested fact, say so briefly and directly.
 - Distinguish degree levels and academic years. Only report a year when the evidence
   explicitly matches it.
+- For a question about one degree, include only information for that degree.
+- Only claim a requested academic year when the evidence explicitly supports it.
+- For a named person, use only passages that identify that same person. Never transfer a
+  degree, institution, date, or role from another person's profile. If the matching
+  person's passages do not state a requested detail, say it is not confirmed in the
+  indexed sources.
 - For a requested list, include all relevant supported items. State that it may be
   incomplete only when the question asks for a complete list and the passages do not
   establish completeness.

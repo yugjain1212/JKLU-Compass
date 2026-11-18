@@ -359,6 +359,45 @@ class DocumentRetriever:
 
         return results
 
+    def retrieve_faculty_profile(self, name: str) -> list[RetrievalResult]:
+        """Find one official faculty profile by name, including omitted middle names."""
+        if not isinstance(name, str) or not name.strip() or self.bm25_retriever is None:
+            return []
+
+        name_tokens = re.findall(r"[a-z0-9]+", name.casefold())
+        if len(name_tokens) < 2:
+            return []
+
+        records_by_url: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record in self.bm25_retriever.records:
+            metadata = record.get("metadata") or {}
+            source_url = self._valid_http_url(metadata.get("source_url"))
+            if source_url is None:
+                continue
+
+            faculty_path = re.search(r"/faculty/([^/?#]+)", urlparse(source_url).path, re.I)
+            if faculty_path is None:
+                continue
+
+            profile_tokens = re.findall(r"[a-z0-9]+", faculty_path.group(1).casefold())
+            remaining_tokens = iter(profile_tokens)
+            matches_profile = all(
+                any(token == candidate for candidate in remaining_tokens) for token in name_tokens
+            )
+            if matches_profile:
+                records_by_url[self._canonical_url(source_url)].append(record)
+
+        if len(records_by_url) != 1:
+            return []
+
+        records = next(iter(records_by_url.values()))
+        record = min(
+            records,
+            key=lambda item: int((item.get("metadata") or {}).get("chunk_index", 0)),
+        )
+        result, _ = self._build_result(record, distance=0.0)
+        return [result]
+
     @classmethod
     def _priority_evidence_reason(cls, query: str, result: RetrievalResult) -> str | None:
         """Return a narrow evidence-priority reason for known list and fee intents."""

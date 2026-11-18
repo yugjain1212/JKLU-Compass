@@ -191,6 +191,94 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+.clarification-options {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+.clarification-option {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #242424;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
+}
+.clarification-option:hover:not(:disabled) {
+  background: #fff;
+  border-color: rgba(0, 0, 0, 0.24);
+  transform: translateY(-1px);
+}
+.clarification-option:focus-visible,
+.clarification-mode:focus-visible {
+  outline: 2px solid rgba(0, 0, 0, 0.62);
+  outline-offset: 2px;
+}
+.clarification-option:disabled { cursor: default; opacity: 0.58; }
+.clarification-option--selected {
+  border-color: rgba(0, 0, 0, 0.3);
+  background: rgba(0, 0, 0, 0.055);
+  opacity: 1 !important;
+}
+.clarification-option__arrow { flex-shrink: 0; color: rgba(0, 0, 0, 0.42); }
+.clarification-other {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+}
+.clarification-other__label {
+  color: rgba(0, 0, 0, 0.62);
+  font-size: 12px;
+}
+.clarification-other textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 9px 11px;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #1a1a1a;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.clarification-other textarea:focus-visible {
+  outline: 2px solid rgba(0, 0, 0, 0.62);
+  outline-offset: 2px;
+}
+.clarification-other textarea::placeholder { color: rgba(0, 0, 0, 0.4); }
+.clarification-other__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+}
+.clarification-other__actions button {
+  min-width: 88px;
+  min-height: 40px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.86);
+  color: white;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.clarification-other__actions button:disabled { opacity: 0.38; cursor: default; }
 .msg__ts {
   font-size: 10px;
   color: rgba(0,0,0,0.3);
@@ -222,6 +310,7 @@
 @media (prefers-reduced-motion: reduce) {
   .msg { animation: none; }
   .typing-dots span { animation: none; opacity: 0.65; }
+  .clarification-option { transition: none; }
 }
 
 /* ── Input box ───────────────────────────────────────────────── */
@@ -309,6 +398,22 @@
   background: rgba(0, 0, 0, 0.06);
   color: rgba(0, 0, 0, 0.7);
 }
+.clarification-mode {
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid rgba(0, 0, 0, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
+  color: rgba(0, 0, 0, 0.58);
+  font-family: "Geist", system-ui, sans-serif;
+  font-size: 11px;
+  cursor: pointer;
+}
+.clarification-mode:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.055);
+  color: rgba(0, 0, 0, 0.85);
+}
+.clarification-mode:disabled { opacity: 0.5; cursor: default; }
 
 .input-hint {
   font-size: 11px;
@@ -381,4 +486,11 @@
   border-radius: 3px;
   font-family: "Geist Mono", ui-monospace, monospace;
   font-size: 0.95em;
+}
+
+@media (max-width: 560px) {
+  .input-hint,
+  .input-hint-sep { display: none; }
+  .input-wrap { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .msg__bubble { max-width: 86%; }
 }
