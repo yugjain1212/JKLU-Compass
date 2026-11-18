@@ -12,6 +12,13 @@ from jklu_compass.embeddings.encoder import EmbeddingEncoder
 from jklu_compass.retrieval.bm25_retriever import BM25Retriever
 from jklu_compass.vectorstore.chroma_store import ChromaVectorStore
 
+PERSON_NAME_TOKEN_ALIASES = {"agarwal": "agrawal"}
+
+
+def canonicalize_person_name_tokens(tokens: list[str]) -> list[str]:
+    """Normalize a small set of common surname spelling variants for lookup."""
+    return [PERSON_NAME_TOKEN_ALIASES.get(token, token) for token in tokens]
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievalResult:
@@ -359,6 +366,27 @@ class DocumentRetriever:
 
         return results
 
+    def retrieve_source_url(self, source_url: str) -> list[RetrievalResult]:
+        """Return indexed chunks for one exact source URL in document order."""
+        if not isinstance(source_url, str) or not source_url.strip() or self.bm25_retriever is None:
+            return []
+
+        valid_url = self._valid_http_url(source_url)
+        if valid_url is None:
+            return []
+
+        canonical_url = self._canonical_url(valid_url)
+        records = [
+            record
+            for record in self.bm25_retriever.records
+            if self._canonical_url(str((record.get("metadata") or {}).get("source_url", "")))
+            == canonical_url
+        ]
+        records.sort(
+            key=lambda record: int((record.get("metadata") or {}).get("chunk_index", 0))
+        )
+        return [self._build_result(record, distance=0.0)[0] for record in records]
+
     def retrieve_faculty_profile(
         self,
         name: str,
@@ -375,7 +403,9 @@ class DocumentRetriever:
             return []
 
         records_by_url: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        variant_records_by_url: dict[str, list[dict[str, Any]]] = defaultdict(list)
         records_by_person_section: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        variant_records_by_person_section: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in self.bm25_retriever.records:
             metadata = record.get("metadata") or {}
             source_url = self._valid_http_url(metadata.get("source_url"))
@@ -387,6 +417,11 @@ class DocumentRetriever:
                 profile_tokens = re.findall(r"[a-z0-9]+", faculty_path.group(1).casefold())
                 if self._ordered_tokens_match(name_tokens, profile_tokens):
                     records_by_url[self._canonical_url(source_url)].append(record)
+                elif self._ordered_tokens_match(
+                    canonicalize_person_name_tokens(name_tokens),
+                    canonicalize_person_name_tokens(profile_tokens),
+                ):
+                    variant_records_by_url[self._canonical_url(source_url)].append(record)
                 continue
 
             section_title = str(metadata.get("section_title") or "").strip()
@@ -395,6 +430,14 @@ class DocumentRetriever:
             section_tokens = re.findall(r"[a-z0-9]+", section_title.casefold())
             if self._ordered_tokens_match(name_tokens, section_tokens):
                 records_by_person_section[self._canonical_url(source_url)].append(record)
+            elif self._ordered_tokens_match(
+                canonicalize_person_name_tokens(name_tokens),
+                canonicalize_person_name_tokens(section_tokens),
+            ):
+                variant_records_by_person_section[self._canonical_url(source_url)].append(record)
+
+        if not records_by_url:
+            records_by_url = variant_records_by_url
 
         if not records_by_url:
             current_sections = {
@@ -403,6 +446,13 @@ class DocumentRetriever:
                 if not urlparse(url).path.casefold().endswith(".pdf")
             }
             records_by_url = current_sections or records_by_person_section
+            if not records_by_url:
+                variant_current_sections = {
+                    url: records
+                    for url, records in variant_records_by_person_section.items()
+                    if not urlparse(url).path.casefold().endswith(".pdf")
+                }
+                records_by_url = variant_current_sections or variant_records_by_person_section
         if len(records_by_url) != 1:
             return []
 

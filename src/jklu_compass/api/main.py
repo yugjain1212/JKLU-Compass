@@ -203,14 +203,14 @@ def create_app(
             history = tuple((turn.role, turn.content) for turn in payload.history)
             clarifier: QueryClarifier | None = request.app.state.query_clarifier
             faculty_lookup = getattr(pipeline, "is_indexed_faculty_query", None)
-            known_faculty = bool(
-                payload.clarification_mode == "adaptive"
-                and callable(faculty_lookup)
-                and faculty_lookup(question)
+            person_lookup = getattr(pipeline, "is_named_person_query", None)
+            skip_adaptive_clarification = payload.clarification_mode == "adaptive" and (
+                (callable(faculty_lookup) and faculty_lookup(question))
+                or (callable(person_lookup) and person_lookup(question))
             )
             decision = (
                 clarifier.clarify(question, history, payload.clarification_mode)
-                if clarifier is not None and not known_faculty
+                if clarifier is not None and not skip_adaptive_clarification
                 else None
             )
             if decision is not None and decision.required:
